@@ -1,0 +1,10 @@
+include LICENSE README.md README.zh-CN.md
+recursive-include instabox_gateway/web *.html *.css *.js *.svg
+prune .local
+prune docs
+prune reports
+prune tests
+prune .github
+exclude .env .env.* *.env
+exclude verify_*.py CODEX_PROMPT.md GATEWAY.md requirements.txt
+global-exclude __pycache__ *.py[cod] *.db *.sqlite *.sqlite3

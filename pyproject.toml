@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "instabox-gateway"
+version = "0.1.0"
+description = "Local multi-account HTTP gateway for InstaBox"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["cryptography>=42,<51"]
+
+[project.urls]
+Repository = "https://github.com/AllenXiao95/InstaBox-Gateway"
+
+[project.scripts]
+igw = "instabox_gateway.cli:main"
+igw-client = "instabox_gateway.client:main"
+
+[tool.setuptools.packages.find]
+include = ["instabox_gateway*"]
+
+[tool.setuptools.package-data]
+instabox_gateway = ["web/*"]

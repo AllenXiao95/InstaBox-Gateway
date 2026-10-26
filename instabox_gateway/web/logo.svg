@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">InstaBox Gateway</title>
+  <desc id="desc">Three account paths converge into one local gateway.</desc>
+  <rect width="160" height="160" rx="36" fill="#12273b"/>
+  <path d="M62 57v-6a16 16 0 0 1 16-16h32a16 16 0 0 1 16 16v58a16 16 0 0 1-16 16H78a16 16 0 0 1-16-16v-6" fill="none" stroke="#71e4c4" stroke-width="6" stroke-linecap="round"/>
+  <g fill="none" stroke-linecap="round" stroke-width="5">
+    <path d="M28 48h6c22 0 18 32 44 32" stroke="#71e4c4"/>
+    <path d="M28 80h50" stroke="#e6faf4"/>
+    <path d="M28 112h6c22 0 18-32 44-32" stroke="#39a99a"/>
+    <path d="M78 80h62m-10-10 10 10-10 10" stroke="#e6faf4" stroke-linejoin="round"/>
+  </g>
+  <circle cx="26" cy="48" r="5" fill="#71e4c4"/>
+  <circle cx="26" cy="80" r="5" fill="#e6faf4"/>
+  <circle cx="26" cy="112" r="5" fill="#39a99a"/>
+</svg>

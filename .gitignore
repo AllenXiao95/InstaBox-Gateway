@@ -1,0 +1,64 @@
+# Local research, verification tools and reports — never publish.
+/.local/
+/reports/
+/docs/
+/tests/
+/verify_*.py
+/CODEX_PROMPT.md
+/GATEWAY.md
+/requirements.txt
+
+# Credentials, verifier journals and SSH state.
+.env
+.env.*
+*.env
+*.pem
+*.key
+.instabox-known-hosts
+.ssh/
+
+# Runtime state and local databases. Product data belongs outside the checkout.
+/runtime/
+/data/
+/logs/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+server.lock
+
+# Python environments, builds and caches.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+/build/
+/dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Local editor and operating system files.
+.idea/
+.vscode/
+/.codex/
+/.claude/
+/.agents/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
