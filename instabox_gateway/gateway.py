@@ -48,6 +48,10 @@ class Gateway:
         self.store, self.upstream = store, upstream
         self.lock = store.lock
         store.recover()
+        from .workspaces import Workspaces
+        from .tasks import Tasks
+        self.workspaces = Workspaces(self)
+        self.tasks = Tasks(self)
 
     def accounts(self):
         return [{k: v for k, v in a.items() if k != "encryptedKey"}

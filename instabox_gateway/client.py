@@ -8,7 +8,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-
+import uuid
 
 from .auth import local_request, private_json, read_private
 from .errors import GatewayError
@@ -22,16 +22,43 @@ def main(argv=None):
     parser.add_argument("--account")
     parser.add_argument("--machine")
     parser.add_argument("--binding")
+    parser.add_argument("--workspace", help="Fixed workspace ID; defaults to the paired profile")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("machines")
     sub.add_parser("login", help="Pair once with the running, unlocked local service")
     sub.add_parser("logout", help="Remove this CLI's saved execution credential")
+    sub.add_parser("use", help="Save a default workspace for this CLI profile").add_argument("id")
+    ws = sub.add_parser("workspace")
+    ws.add_argument("operation", choices=("list", "add"))
+    ws.add_argument("--name")
+    ws.add_argument("--remote-root")
+    ws.add_argument("--local-root", type=Path, default=Path.cwd())
     select = sub.add_parser("select")
     select.add_argument("--allow-wake", action="store_true")
     execute = sub.add_parser("exec")
     execute.add_argument("--cwd")
     execute.add_argument("--timeout", type=int, default=60)
     execute.add_argument("argv", nargs=argparse.REMAINDER)
+    execute.add_argument("--mode", choices=("sync", "background_task"), default="sync")
+    execute.add_argument("--submission-id")
+    for action in ("test", "git"):
+        command = sub.add_parser(action)
+        command.add_argument("argv", nargs=argparse.REMAINDER)
+    task = sub.add_parser("task")
+    task.add_argument("operation", choices=("start", "watch", "list", "status", "logs", "cancel", "resume", "verify", "events"))
+    task.add_argument("id", nargs="?")
+    task.add_argument("--submission-id")
+    task.add_argument("--argv", help="JSON argument array")
+    task.add_argument("--verify-argv", help="JSON verification argument array")
+    task.add_argument("--preflight-argv", help="JSON preflight argument array, checked before starting")
+    task.add_argument("--resume-argv", help="JSON checkpoint-aware resume argument array")
+    task.add_argument("--expected-commit")
+    task.add_argument("--status-path", help="Existing producer JSON state, relative to the workspace")
+    task.add_argument("--stdout-path")
+    task.add_argument("--stderr-path")
+    task.add_argument("--cwd", default=".")
+    task.add_argument("--channel", choices=("stdout", "stderr"), default="stdout")
+    task.add_argument("--offset", type=int, default=0)
     for action in ("upload", "download"):
         file = sub.add_parser(action)
         file.add_argument("local", type=Path)
@@ -62,6 +89,11 @@ def main(argv=None):
     except (OSError, ValueError, GatewayError) as exc:
         print(getattr(exc, "code", "local_pairing_failed") + "; start/unlock Gateway and check the data directory", file=sys.stderr)
         return 1
+    use_default = args.action in ("exec", "test", "git", "upload", "download", "resume") or args.action == "task" and args.operation in ("start", "watch")
+    if use_default and not (args.binding or args.account or args.machine or args.workspace):
+        args.workspace = profile.get("workspaceId")
+    if args.action == "select" and args.workspace:
+        parser.error("A workspace is already fixed; select creates a new binding without --workspace")
     try:
         url = urllib.parse.urlsplit(args.url)
         if url.port is not None and not 1 <= url.port <= 65535:
@@ -72,13 +104,27 @@ def main(argv=None):
         parser.error("Gateway URL must be a local loopback HTTP origin")
     if args.binding and (args.account or args.machine):
         parser.error("Use either binding or account + machine")
-    if args.action in ("exec", "upload", "download", "resume") and not (args.binding or args.account and args.machine):
+    if args.workspace and (args.binding or args.account or args.machine):
+        parser.error("Use a workspace or an explicit target, never both")
+    if args.action in ("exec", "upload", "download", "resume") and not (args.workspace or args.binding or args.account and args.machine):
         parser.error("An explicit account + machine or binding is required")
     paired_token = profile.get("token") if profile.get("url") == args.url.rstrip("/") else None
     token = os.environ.get("IGW_TOKEN") or paired_token or getpass.getpass("Gateway execution token: ")
     target = {"bindingId": args.binding} if args.binding else {"accountId": args.account, "machineId": args.machine}
     body, method, path = None, "GET", "/api/v1/machines"
     headers = {"Authorization": "Bearer " + token}
+    from .upstream import NoRedirect
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    workspace = None
+    if args.workspace:
+        try:
+            req = urllib.request.Request(args.url.rstrip("/") + "/api/v1/workspaces", headers=headers)
+            with opener.open(req, timeout=10) as response:
+                workspace = next(w for w in json.loads(response.read(2 * 1024 * 1024))["workspaces"] if w["id"] == args.workspace)
+            target = {"bindingId": workspace["bindingId"]}
+        except (OSError, ValueError, KeyError, StopIteration):
+            print("workspace_not_found_or_unavailable", file=sys.stderr)
+            return 1
     if args.action == "select":
         body = {"allowWake": args.allow_wake}
         if args.binding or args.machine:
@@ -92,8 +138,23 @@ def main(argv=None):
         if args.cwd:
             body["cwd"] = args.cwd
         method, path = "POST", "/api/v1/exec"
+        if args.mode == "background_task":
+            if not args.workspace:
+                parser.error("background_task requires --workspace")
+            body = {"mode": "background_task", "workspaceId": args.workspace, "argv": command, "cwd": args.cwd or "."}
+            headers["Idempotency-Key"] = args.submission_id or uuid.uuid4().hex
+            print("Submission ID: " + headers["Idempotency-Key"], file=sys.stderr)
+        elif args.workspace:
+            body.pop("target")
+            path = "/api/v1/workspaces/" + args.workspace + "/exec"
     elif args.action in ("upload", "download"):
         path = "/api/v1/file?" + urllib.parse.urlencode(dict(target, path=args.remote))
+        if workspace:
+            path = "/api/v1/file?" + urllib.parse.urlencode({"workspaceId": args.workspace, "path": args.remote})
+            base = Path(workspace["localRoot"]).resolve()
+            local = args.local.expanduser().resolve()
+            if base != local and base not in local.parents:
+                parser.error("Local file must be inside the workspace localRoot")
         if args.action == "upload":
             if args.local.stat().st_size > 8 * 1024 * 1024:
                 parser.error("file exceeds Gateway 8 MiB limit")
@@ -104,6 +165,70 @@ def main(argv=None):
         headers["Idempotency-Key"] = args.idempotency_key
     elif args.action == "operation":
         path = "/api/v1/resumes/" + urllib.parse.quote(args.id, safe="")
+    elif args.action == "workspace":
+        path = "/api/v1/workspaces"
+        if args.operation == "add":
+            if not args.binding or not args.name or not args.remote_root:
+                parser.error("workspace add needs --binding, --name and --remote-root")
+            body, method = {"name": args.name, "bindingId": args.binding, "remoteRoot": args.remote_root, "localRoot": str(args.local_root)}, "POST"
+    elif args.action in ("test", "git"):
+        if not args.workspace:
+            parser.error("test/git require a workspace")
+        body = {"argv": args.argv[1:] if args.argv[:1] == ["--"] else args.argv}
+        method, path = "POST", "/api/v1/workspaces/" + args.workspace + "/" + args.action
+    elif args.action == "task":
+        path = "/api/v1/tasks"
+        if args.operation == "events":
+            path = "/api/v1/task-events"
+        elif args.operation == "watch":
+            if not args.workspace or not args.status_path:
+                parser.error("task watch needs a workspace and --status-path")
+            path += "/watch"
+            body, method = {"workspaceId": args.workspace, "statusPath": args.status_path}, "POST"
+            if args.stdout_path:
+                body["stdoutPath"] = args.stdout_path
+            if args.stderr_path:
+                body["stderrPath"] = args.stderr_path
+        elif args.operation == "start":
+            if not args.workspace or not args.argv:
+                parser.error("task start needs a workspace and --argv JSON")
+            try:
+                body = {"workspaceId": args.workspace, "argv": json.loads(args.argv), "cwd": args.cwd}
+                for name, argument in (("preflightArgv", "preflight_argv"), ("verifyArgv", "verify_argv"), ("resumeArgv", "resume_argv")):
+                    value = getattr(args, argument)
+                    if value:
+                        body[name] = json.loads(value)
+            except ValueError:
+                parser.error("Task argv values must be JSON arrays")
+            if args.expected_commit:
+                body["expectedCommit"] = args.expected_commit
+            method = "POST"
+        elif args.operation != "list":
+            if not args.id or not args.id.startswith("t_") or not args.id.replace("_", "").isalnum():
+                parser.error("A valid task ID is required")
+            path += "/" + args.id
+            if args.operation == "logs":
+                path += "/logs?" + urllib.parse.urlencode({"channel": args.channel, "offset": args.offset})
+            elif args.operation != "status":
+                path += "/" + args.operation
+                body, method = {}, "POST"
+        if method == "POST":
+            headers["Idempotency-Key"] = args.submission_id or uuid.uuid4().hex
+            print("Submission ID: " + headers["Idempotency-Key"], file=sys.stderr)
+    elif args.action == "use":
+        if not paired_token:
+            parser.error("Run igw-client login before saving a profile")
+        req = urllib.request.Request(args.url.rstrip("/") + "/api/v1/workspaces", headers=headers)
+        try:
+            with opener.open(req, timeout=10) as response:
+                if not any(w["id"] == args.id for w in json.loads(response.read(2 * 1024 * 1024))["workspaces"]):
+                    parser.error("Workspace not found")
+            private_json(profile_path, {**profile, "workspaceId": args.id})
+            print("Default workspace saved. Existing tasks remain fixed.")
+            return 0
+        except (OSError, ValueError):
+            print("workspace_profile_failed", file=sys.stderr)
+            return 1
     elif args.account:
         path += "?" + urllib.parse.urlencode({"accountId": args.account})
     data = body
@@ -126,7 +251,7 @@ def main(argv=None):
                 return 0
             value = json.loads(result)
             print(json.dumps(value, ensure_ascii=True))
-            if args.action == "exec":
+            if args.action in ("exec", "test", "git"):
                 code = value["result"]["exitCode"]
                 return code if 0 <= code <= 255 else 1
             return 0

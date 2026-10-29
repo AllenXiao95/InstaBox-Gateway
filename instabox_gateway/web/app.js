@@ -100,8 +100,8 @@ function closeNav(focus = false) {
 }
 function route(focus = true) {
   if (!state.token) return;
-  const page = ["instances", "accounts", "execution", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "instances";
-  for (const name of ["instances", "accounts", "execution", "settings"]) $("page-" + name).hidden = name !== page;
+  const page = ["instances", "accounts", "execution", "tasks", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "instances";
+  for (const name of ["instances", "accounts", "execution", "tasks", "settings"]) $("page-" + name).hidden = name !== page;
   document.querySelectorAll("[data-page]").forEach(n => { if (n.dataset.page === page) n.setAttribute("aria-current", "page"); else n.removeAttribute("aria-current"); });
   closeNav();
   if (focus) $("main").focus({preventScroll: true});
@@ -510,7 +510,7 @@ async function enterConsole(csrf) {
   state.epoch++; state.csrf=csrf; state.token="session";
   const data=await api("/api/admin/accounts");state.accounts=data.accounts;
   $("login").hidden=true;$("workspace").hidden=false;$("local-address").textContent=location.host;
-  setText($("client-help"),"igw-client login\nigw-client machines\nigw-client --account ACCOUNT_ID --machine MACHINE_ID select\nigw-client --binding BINDING_ID exec -- printf hello");
+  setText($("client-help"),"igw-client login\nigw-client workspace list\nigw-client use WORKSPACE_ID\nigw-client exec -- printf hello\nigw-client exec --mode background_task -- python3 build.py");
   route();renderTarget();window.dispatchEvent(new Event("igw:login"));await refresh();
 }
 $("login-form").addEventListener("submit",async event=>{

@@ -30,6 +30,13 @@ class Server(ThreadingHTTPServer):
         self.auth = BrowserAuth()
         super().__init__(address, Handler)
 
+    def serve_forever(self, poll_interval=0.5):
+        self.gateway.tasks.start_monitor()
+        try:
+            super().serve_forever(poll_interval)
+        finally:
+            self.gateway.tasks.close()
+
     def handle_error(self, request, client_address):
         # Never send request/response data or tracebacks to default HTTP logs.
         pass
@@ -133,6 +140,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/favicon.ico": ("favicon.ico", "image/x-icon"),
                   "/i18n.js": ("i18n.js", "text/javascript; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                  "/tasks.js": ("tasks.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8")}
         if method == "GET" and path in static:
             name, mime = static[path]
@@ -184,6 +192,42 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         g = self.server.gateway
+        if path == "/api/v1/workspaces":
+            if method == "GET":
+                return self._send(200, {"workspaces": g.store.rows("workspace")})
+            if method == "POST":
+                return self._send(201, g.workspaces.create(self._body()))
+        match = re.fullmatch(r"/api/v1/workspaces/(w_[a-z0-9]+)/(exec|test|git)", path)
+        if match and method == "POST":
+            return self._send(200, g.workspaces.execute(match[1], self._body(), match[2]))
+        if path == "/api/v1/tasks":
+            if method == "GET":
+                return self._send(200, {"tasks": [g.tasks.public(t) for t in g.store.rows("task")]})
+            if method == "POST":
+                return self._send(202, g.tasks.submit(self._body(), self.headers.get("Idempotency-Key")))
+        if path == "/api/v1/tasks/watch" and method == "POST":
+            return self._send(201, g.tasks.watch(self._body(), self.headers.get("Idempotency-Key")))
+        match = re.fullmatch(r"/api/v1/tasks/(t_[a-z0-9]+)(?:/(logs|cancel|resume|verify))?", path)
+        if match:
+            ident, action = match.groups()
+            if action is None and method == "GET":
+                return self._send(200, g.tasks.refresh(ident))
+            if action == "logs" and method == "GET":
+                fields(q, ("channel", "offset"))
+                require(q.get("offset", "0").isdecimal())
+                return self._send(200, g.tasks.call(g.tasks.get(ident), "logs", channel=q.get("channel", "stdout"), offset=int(q.get("offset", 0))))
+            if action in ("cancel", "resume", "verify") and method == "POST":
+                fields(self._body(), ())
+                return self._send(200, g.tasks.control(ident, action, self.headers.get("Idempotency-Key")))
+        if path == "/api/v1/task-events" and method == "GET":
+            return self._send(200, {"events": g.store.rows("task_event")})
+        match = re.fullmatch(r"/api/v1/task-events/(t_[a-z0-9]+)/read", path)
+        if match and method == "POST":
+            event = g.store.get("task_event", match[1])
+            require(event is not None, "event_not_found", 404)
+            event["read"] = True
+            g.store.put("task_event", match[1], event)
+            return self._send(200, event)
         if path == "/api/admin/accounts":
             if method == "GET":
                 return self._send(200, {"accounts": g.accounts()})
@@ -219,12 +263,22 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/bindings" and method == "POST":
             return self._send(201, g.select(self._body()))
         if path == "/api/v1/exec" and method == "POST":
-            return self._send(200, g.execute(self._body()))
+            body = self._body()
+            if body.get("mode") == "background_task":
+                return self._send(202, g.tasks.submit(body, self.headers.get("Idempotency-Key")))
+            if body.get("mode") == "sync":
+                body.pop("mode")
+            return self._send(200, g.execute(body))
         if path == "/api/v1/file" and method in ("GET", "PUT"):
-            fields(q, ("bindingId", "accountId", "machineId", "path"))
-            target = {k: v for k, v in q.items() if k != "path"}
+            fields(q, ("bindingId", "accountId", "machineId", "workspaceId", "path"))
+            if "workspaceId" in q:
+                require(set(q) == {"workspaceId", "path"}, "workspace_target_conflict")
+                target, remote_path = g.workspaces.file_path(q["workspaceId"], q["path"])
+            else:
+                target = {k: v for k, v in q.items() if k != "path"}
+                remote_path = q.get("path")
             data = self._body(binary=True) if method == "PUT" else None
-            status, result, request_id = g.file(target, q.get("path"), data)
+            status, result, request_id = g.file(target, remote_path, data)
             return self._send(status, result, "application/json" if method == "PUT" else "application/octet-stream", request_id)
         if path == "/api/v1/resumes" and method == "POST":
             body = self._body()
