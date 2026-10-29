@@ -1,6 +1,7 @@
-"""Fixed HTTPS origin; no ambient proxies, redirects, or automatic retries."""
+"""Fixed HTTPS origin; only an explicit local proxy, no redirects or retries."""
 import http.client
 import json
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,6 +19,23 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Upstream:
+    def __init__(self):
+        # Opt-in only. HTTPS_PROXY/HTTP_PROXY remain ignored so unrelated shell
+        # settings cannot silently reroute credentials. CONNECT keeps TLS end to end.
+        proxy = os.environ.get("IGW_UPSTREAM_PROXY", "")
+        if proxy:
+            try:
+                parsed = urllib.parse.urlsplit(proxy)
+                valid = (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                         and parsed.port is not None and 1 <= parsed.port <= 65535
+                         and not parsed.username and not parsed.password
+                         and parsed.path in ("", "/") and not parsed.query and not parsed.fragment)
+            except ValueError:
+                valid = False
+            if not valid:
+                raise GatewayError("invalid_upstream_proxy")
+        self.proxies = {"https": proxy} if proxy else {}
+
     def request(self, key, method, path, *, query=None, body=None, binary=False, idempotency=None, timeout=25):
         headers = {"X-API-Key": key, "Accept": "application/octet-stream" if binary else "application/json"}
         data = None
@@ -33,7 +51,7 @@ class Upstream:
         if query:
             url += "?" + urllib.parse.urlencode(query)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(self.proxies), NoRedirect())
         uncertain = "UNKNOWN" if method in ("POST", "PUT") else "FAILED"
         try:
             try:
