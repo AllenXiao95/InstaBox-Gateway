@@ -4,13 +4,16 @@ import os
 import re
 import secrets
 import threading
+import time
+from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, quote
 
 from .errors import GatewayError
 from .gateway import fields, require
-from .upstream import MAX_FILE
+from .transfer import FileBody
+from .auth import BrowserAuth
 
 
 class Server(ThreadingHTTPServer):
@@ -24,7 +27,18 @@ class Server(ThreadingHTTPServer):
         require(address[0] == "127.0.0.1", "loopback_required")
         self.gateway = gateway
         self.instance_id = secrets.token_hex(16)
+        self.auth = BrowserAuth()
         super().__init__(address, Handler)
+
+    def serve_forever(self, poll_interval=0.5):
+        self.gateway.tasks.start_monitor()
+        self.gateway.drive.start_monitor()
+        try:
+            super().serve_forever(poll_interval)
+        finally:
+            self.gateway.files.close()
+            self.gateway.drive.close()
+            self.gateway.tasks.close()
 
     def handle_error(self, request, client_address):
         # Never send request/response data or tracebacks to default HTTP logs.
@@ -41,17 +55,26 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, status, data, content_type="application/json", request_id=None):
         if not isinstance(data, bytes):
             data = json.dumps(data, ensure_ascii=True).encode()
+        self._headers(status, len(data), content_type, request_id)
+        self.wfile.write(data)
+
+    def _headers(self, status, length, content_type, request_id=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
+        if length is not None:
+            self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        if getattr(self, "_attachment", None):
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(self._attachment, safe=""))
         if request_id:
             self.send_header("X-Gateway-Request-Id", request_id)
+        if getattr(self, "_cookie", None):
+            self.send_header("Set-Cookie", self._cookie)
         self.end_headers()
-        self.wfile.write(data)
+        self._response_started = True
 
     def _body(self, binary=False):
         require(not self.headers.get("Transfer-Encoding"), "transfer_encoding_unsupported")
@@ -59,12 +82,13 @@ class Handler(BaseHTTPRequestHandler):
         require(raw_length.isdecimal(), "invalid_content_length")
         require(len(self.headers.get_all("Content-Length", [])) <= 1, "invalid_content_length")
         length = int(raw_length)
-        require(length <= (MAX_FILE if binary else 2 * 1024 * 1024), "request_too_large", 413)
-        raw = self.rfile.read(length)
-        require(len(raw) == length, "incomplete_body")
         if binary:
             require(self.headers.get_content_type() == "application/octet-stream", "content_type_required", 415)
-            return raw
+            self.connection.settimeout(60)
+            return FileBody(self.rfile, length)
+        require(length <= 2 * 1024 * 1024, "request_too_large", 413)
+        raw = self.rfile.read(length)
+        require(len(raw) == length, "incomplete_body")
         require(self.headers.get_content_type() == "application/json", "content_type_required", 415)
         try:
             result = json.loads(raw)
@@ -75,6 +99,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth(self, admin=False):
         authorization = self.headers.get("Authorization", "")
+        if not authorization:
+            _, session = self._session()
+            require(session is not None, "authentication_required", 401)
+            if self.command not in ("GET", "HEAD"):
+                require(self.headers.get("Origin") in self._origins
+                        and hmac.compare_digest(self.headers.get("X-Gateway-CSRF", "").encode(), session["csrf"].encode()), "csrf_required", 403)
+            return
         require(authorization.startswith("Bearer "), "authentication_required", 401)
         token = authorization[7:]
         require(len(token) <= 256 and token.isascii(), "authentication_required", 401)
@@ -82,10 +113,24 @@ class Handler(BaseHTTPRequestHandler):
         roles = ("admin",) if admin else ("admin", "execution")
         require(any(hmac.compare_digest(token, store.token(role)) for role in roles), "authentication_required", 401)
 
+    def _session(self):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return None, None
+        ident = cookie["igw_session"].value if "igw_session" in cookie else ""
+        session = self.server.auth.sessions.get(ident)
+        if session and session["expires"] <= time.monotonic():
+            self.server.auth.sessions.pop(ident, None)
+            session = None
+        return ident, session
+
     def _dispatch(self):
         self.connection.settimeout(15)
         port = self.server.server_address[1]
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        self._origins = {"http://" + h for h in hosts}
         require(self.headers.get("Host") in hosts, "host_denied", 403)
         origin = self.headers.get("Origin")
         require(origin is None or origin in {"http://" + h for h in hosts}, "origin_denied", 403)
@@ -103,10 +148,47 @@ class Handler(BaseHTTPRequestHandler):
                   "/favicon.ico": ("favicon.ico", "image/x-icon"),
                   "/i18n.js": ("i18n.js", "text/javascript; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                  "/tasks.js": ("tasks.js", "text/javascript; charset=utf-8"),
+                  "/drive.js": ("drive.js", "text/javascript; charset=utf-8"),
+                  "/files.js": ("files.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8")}
         if method == "GET" and path in static:
             name, mime = static[path]
             return self._send(200, files("instabox_gateway").joinpath("web", name).read_bytes(), mime)
+        auth = self.server.auth
+        if path in ("/api/auth/ticket", "/api/auth/pair", "/api/auth/status", "/api/auth/stop") and method == "POST":
+            require(hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Local " + auth.bootstrap).encode()), "authentication_required", 401)
+            fields(self._body(), ())
+            value = {"instanceId": self.server.instance_id}
+            if path.endswith(("status", "stop")):
+                self._send(200, {**value, "pid": os.getpid(), "port": port})
+                if path.endswith("stop"):
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            value.update({"ticket": auth.ticket()} if path.endswith("ticket") else {"token": self.server.gateway.store.token("execution")})
+            return self._send(200, value)
+        if path == "/api/auth/login" and method == "POST":
+            require(origin in self._origins, "origin_denied", 403)
+            body = self._body()
+            fields(body, ("ticket",))
+            if "ticket" in body:
+                require(isinstance(body["ticket"], str) and len(body["ticket"]) < 256)
+                ident, csrf = auth.session(body["ticket"])
+            else:
+                self._auth(admin=True)
+                ident, csrf = auth.session()
+            self._cookie = "igw_session=" + ident + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800"
+            return self._send(200, {"csrf": csrf})
+        if path == "/api/auth/session" and method == "GET":
+            _, session = self._session()
+            require(session is not None, "authentication_required", 401)
+            return self._send(200, {"csrf": session["csrf"]})
+        if path == "/api/auth/logout" and method == "POST":
+            self._auth(admin=True)
+            ident, _ = self._session()
+            auth.sessions.pop(ident, None)
+            self._cookie = "igw_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+            return self._send(200, {"loggedOut": True})
         self._auth(admin=path.startswith("/api/admin/"))
         if path == "/api/admin/service" and method == "GET":
             return self._send(200, {"instanceId": self.server.instance_id,
@@ -120,6 +202,140 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         g = self.server.gateway
+        if path == "/api/admin/files/local" and method == "GET":
+            fields(q, ("path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.files.local(q.get("path"), int(q.get("offset", "0"))))
+        if path == "/api/admin/files/remote" and method == "GET":
+            fields(q, ("bindingId", "path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.files.remote(q.get("bindingId"), q.get("path", "."), int(q.get("offset", "0"))))
+        if path == "/api/admin/files/downloads":
+            if method == "GET":
+                fields(q, ())
+                return self._send(200, {"downloads": [g.files.public(row) for row in g.files.downloads()]})
+            if method == "POST":
+                return self._send(202, g.files.start(self._body(), self.headers.get("Idempotency-Key")))
+        match = re.fullmatch(r"/api/admin/files/downloads/(d_[a-z0-9]+)/cancel", path)
+        if match and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.files.cancel(match[1]))
+        if path == "/api/admin/drive" and method == "GET":
+            return self._send(200, g.drive.status())
+        if path == "/api/admin/drive/config" and method == "PUT":
+            return self._send(200, g.drive.configure(self._body()))
+        if path == "/api/admin/drive/connect" and method == "POST":
+            return self._send(200, g.drive.connect(self._body()))
+        if path == "/api/admin/drive/disconnect" and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.drive.disconnect())
+        if path == "/api/admin/drive/files" and method == "GET":
+            fields(q, ("parentId", "pageToken", "shared"))
+            return self._send(200, g.drive.files(q.get("parentId", "root"), q.get("pageToken"), q.get("shared") == "true"))
+        if path == "/api/admin/drive/selections" and method == "POST":
+            return self._send(201, g.drive.select(self._body()))
+        match = re.fullmatch(r"/api/admin/drive/selections/(gs_[a-z0-9]+)", path)
+        if match and method == "DELETE":
+            g.store.delete("drive_selection", match[1])
+            return self._send(200, {"removed": True})
+        if path == "/api/v1/drive/selections" and method == "GET":
+            return self._send(200, {"selections": g.drive.selections()})
+        match = re.fullmatch(r"/api/v1/drive/selections/(gs_[a-z0-9]+)/(files|content|upload)", path)
+        if match:
+            ident, action = match.groups()
+            if action == "files" and method == "GET":
+                fields(q, ("parentId", "pageToken"))
+                selection = g.drive.selection(ident)
+                parent = q.get("parentId", selection["fileId"])
+                metadata = g.drive.selected_file(selection, parent)
+                require(metadata["mimeType"] == "application/vnd.google-apps.folder", "drive_not_a_folder")
+                return self._send(200, g.drive.files(parent, q.get("pageToken"), connection_id=selection["connectionId"]))
+            if action == "content" and method == "GET":
+                fields(q, ("fileId", "download", "preview"))
+                preview = q.get("preview") == "1"
+                with g.drive.content(ident, q.get("fileId"), partial=preview) as (metadata, reader):
+                    if preview:
+                        require(metadata["mimeType"].startswith("text/") or metadata["mimeType"] == "application/json", "drive_preview_unsupported", 415)
+                        data = bytearray()
+                        while len(data) <= 262144:
+                            chunk = reader.read(min(65536, 262145 - len(data)))
+                            if not chunk:
+                                break
+                            data.extend(chunk)
+                        result = dict(text=bytes(data[:262144]).decode("utf-8", "replace"), truncated=len(data) > 262144)
+                    else:
+                        self._attachment = metadata["name"]
+                        self.connection.settimeout(60)
+                        self._headers(200, metadata["bytes"], "application/octet-stream")
+                        while True:
+                            chunk = reader.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                if preview:
+                    return self._send(200, result)
+                return
+            if action == "upload" and method == "POST":
+                fields(q, ("name",))
+                return self._send(200, g.drive.upload(ident, q.get("name"), self._body(binary=True), self.headers.get("Idempotency-Key")))
+        if path == "/api/v1/drive/imports":
+            if method == "GET":
+                return self._send(200, {"imports": g.store.rows("drive_import"), "uploads": [g.drive.public_upload(u) for u in g.store.rows("drive_upload")]})
+            if method == "POST":
+                return self._send(202, g.drive.submit(self._body(), self.headers.get("Idempotency-Key")))
+        match = re.fullmatch(r"/api/v1/drive/uploads/(du_[a-z0-9]+)/verify", path)
+        if match and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.drive.verify_upload(match[1]))
+        match = re.fullmatch(r"/api/v1/drive/imports/(t_[a-z0-9]+)/(cancel|resume)", path)
+        if match and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.drive.control(match[1], match[2]))
+        match = re.fullmatch(r"/api/v1/workspaces/(w_[a-z0-9]+)/files", path)
+        if match and method == "GET":
+            fields(q, ("path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.workspaces.list_files(match[1], q.get("path", "."), int(q.get("offset", "0"))))
+        if path == "/api/v1/persistent-files" and method == "GET":
+            fields(q, ("bindingId", "path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.workspaces.list_persistent(q.get("bindingId"), q.get("path", "."), int(q.get("offset", "0"))))
+        if path == "/api/v1/workspaces":
+            if method == "GET":
+                return self._send(200, {"workspaces": g.store.rows("workspace")})
+            if method == "POST":
+                return self._send(201, g.workspaces.create(self._body()))
+        match = re.fullmatch(r"/api/v1/workspaces/(w_[a-z0-9]+)/(exec|test|git)", path)
+        if match and method == "POST":
+            return self._send(200, g.workspaces.execute(match[1], self._body(), match[2]))
+        if path == "/api/v1/tasks":
+            if method == "GET":
+                return self._send(200, {"tasks": [g.tasks.public(t) for t in g.store.rows("task")]})
+            if method == "POST":
+                return self._send(202, g.tasks.submit(self._body(), self.headers.get("Idempotency-Key")))
+        if path == "/api/v1/tasks/watch" and method == "POST":
+            return self._send(201, g.tasks.watch(self._body(), self.headers.get("Idempotency-Key")))
+        match = re.fullmatch(r"/api/v1/tasks/(t_[a-z0-9]+)(?:/(logs|cancel|resume|verify))?", path)
+        if match:
+            ident, action = match.groups()
+            if action is None and method == "GET":
+                return self._send(200, g.tasks.refresh(ident))
+            if action == "logs" and method == "GET":
+                fields(q, ("channel", "offset"))
+                require(q.get("offset", "0").isdecimal())
+                return self._send(200, g.tasks.call(g.tasks.get(ident), "logs", channel=q.get("channel", "stdout"), offset=int(q.get("offset", 0))))
+            if action in ("cancel", "resume", "verify") and method == "POST":
+                fields(self._body(), ())
+                return self._send(200, g.tasks.control(ident, action, self.headers.get("Idempotency-Key")))
+        if path == "/api/v1/task-events" and method == "GET":
+            return self._send(200, {"events": g.store.rows("task_event")})
+        match = re.fullmatch(r"/api/v1/task-events/(t_[a-z0-9]+)/read", path)
+        if match and method == "POST":
+            event = g.store.get("task_event", match[1])
+            require(event is not None, "event_not_found", 404)
+            event["read"] = True
+            g.store.put("task_event", match[1], event)
+            return self._send(200, event)
         if path == "/api/admin/accounts":
             if method == "GET":
                 return self._send(200, {"accounts": g.accounts()})
@@ -155,12 +371,48 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/bindings" and method == "POST":
             return self._send(201, g.select(self._body()))
         if path == "/api/v1/exec" and method == "POST":
-            return self._send(200, g.execute(self._body()))
-        if path == "/api/v1/file" and method in ("GET", "PUT"):
-            fields(q, ("bindingId", "accountId", "machineId", "path"))
-            target = {k: v for k, v in q.items() if k != "path"}
+            body = self._body()
+            if body.get("mode") == "background_task":
+                return self._send(202, g.tasks.submit(body, self.headers.get("Idempotency-Key")))
+            if body.get("mode") == "sync":
+                body.pop("mode")
+            return self._send(200, g.execute(body))
+        if path == "/api/v1/connection-info" and method == "GET":
+            return self._send(200, g.connection_info(q))
+        if path in ("/api/v1/file", "/api/v1/persistent-file") and method in ("GET", "PUT"):
+            fields(q, ("bindingId", "accountId", "machineId", "workspaceId", "path", "download"))
+            attachment = q.pop("download", None)
+            require(attachment is None or method == "GET" and attachment == "1", "invalid_download_option")
+            if path == "/api/v1/persistent-file":
+                require(method == "GET" and set(q) == {"bindingId", "path"}, "invalid_request")
+                target = {"bindingId": q["bindingId"]}
+                remote_path = g.workspaces.persistent_path(q["bindingId"], q["path"])
+            elif "workspaceId" in q:
+                require(set(q) == {"workspaceId", "path"}, "workspace_target_conflict")
+                target, remote_path = g.workspaces.file_path(q["workspaceId"], q["path"])
+            else:
+                target = {k: v for k, v in q.items() if k != "path"}
+                remote_path = q.get("path")
+            if method == "GET":
+                if attachment:
+                    self._attachment = remote_path.rsplit("/", 1)[-1]
+                require(not self.headers.get("Range") and not self.headers.get("If-Range"),
+                        "range_not_supported")
+                deadline = time.monotonic() + 7200
+                self.connection.settimeout(60)
+                with g.download(target, remote_path) as (response, row):
+                    remaining = row["expectedBytes"]
+                    self._headers(200, remaining, "application/octet-stream", row["id"])
+                    while remaining:
+                        require(time.monotonic() < deadline, "download_deadline_exceeded", 504)
+                        chunk = response.read(min(64 * 1024, remaining))
+                        require(bool(chunk), "incomplete_download", 502)
+                        self.wfile.write(chunk)
+                        row["bytesTransferred"] += len(chunk)
+                        remaining -= len(chunk)
+                return
             data = self._body(binary=True) if method == "PUT" else None
-            status, result, request_id = g.file(target, q.get("path"), data)
+            status, result, request_id = g.upload(target, remote_path, data, data.length)
             return self._send(status, result, "application/json" if method == "PUT" else "application/octet-stream", request_id)
         if path == "/api/v1/resumes" and method == "POST":
             body = self._body()
@@ -172,13 +424,16 @@ class Handler(BaseHTTPRequestHandler):
         raise GatewayError("route_not_found", 404)
 
     def _handle(self):
+        self._response_started = False
         try:
             self._dispatch()
         except GatewayError as exc:
-            self._send(exc.status, {"error": exc.public()})
+            if not self._response_started:
+                self._send(exc.status, {"error": exc.public()})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
         except Exception:
-            self._send(500, {"error": {"code": "internal_error", "outcome": "UNKNOWN"}})
+            if not self._response_started:
+                self._send(500, {"error": {"code": "internal_error", "outcome": "UNKNOWN"}})
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _handle

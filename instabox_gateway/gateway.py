@@ -1,13 +1,15 @@
 import hashlib
+import http.client
 import posixpath
 import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .errors import GatewayError
 from .store import now
-from .upstream import MAX_FILE
+from .transfer import FileBody
 
 
 def require(condition, code="invalid_request", status=400):
@@ -48,6 +50,14 @@ class Gateway:
         self.store, self.upstream = store, upstream
         self.lock = store.lock
         store.recover()
+        from .workspaces import Workspaces
+        from .tasks import Tasks
+        self.workspaces = Workspaces(self)
+        self.tasks = Tasks(self)
+        from .drive import Drive
+        self.drive = Drive(self)
+        from .files import Files
+        self.files = Files(self)
 
     def accounts(self):
         return [{k: v for k, v in a.items() if k != "encryptedKey"}
@@ -289,6 +299,43 @@ class Gateway:
         if machine["state"] != "running":
             require(wake, "machine_not_running", 409)
             result["resume"] = self.resume({"bindingId": ident}, "select-" + ident, True)
+        cached = self.store.get("connection", ctx.account + ":" + mid)
+        result["ssh"] = (cached if cached and cached["version"] == ctx.version
+                         and cached["status"] == "available"
+                         else self.connection_info({"bindingId": ident}))
+        return result
+
+    def connection_info(self, target):
+        """Discover metadata only; never create certificates, tokens or sessions."""
+        ctx, mid = self._resolve(target)
+        result = dict(accountId=ctx.account, machineId=mid, version=ctx.version, checkedAt=now())
+        try:
+            self.detail(ctx.account, mid, ctx=ctx)
+            _, info = self._call(ctx, "GET", "/v1/machines/" + mid + "/connection-info")
+            trust = info.get("hostTrust")
+            require(info.get("machineId") == mid and info.get("username") == mid
+                    and info.get("transport") == "ssh"
+                    and isinstance(info.get("host"), str) and 0 < len(info["host"]) <= 253
+                    and not any(c.isspace() or ord(c) < 33 for c in info["host"])
+                    and type(info.get("port")) is int and 1 <= info["port"] <= 65535
+                    and isinstance(trust, dict) and trust.get("type") == "ca"
+                    and isinstance(trust.get("publicKey"), str) and 0 < len(trust["publicKey"]) <= 4096
+                    and not any(c in trust["publicKey"] for c in "\r\n\0")
+                    and isinstance(trust.get("principals"), list)
+                    and all(isinstance(p, str) and 0 < len(p) <= 253
+                            and not any(c.isspace() or ord(c) < 33 for c in p) for p in trust["principals"])
+                    and isinstance(info.get("capabilities"), list)
+                    and all(isinstance(c, str) for c in info["capabilities"]),
+                    "invalid_connection_info", 502)
+            result.update(status="available", transport="ssh", host=info["host"], port=info["port"],
+                          username=mid, hostTrust={k: trust[k] for k in ("type", "publicKey", "principals")},
+                          capabilities=[c for c in info["capabilities"] if c in ("pty", "exec", "port-forwarding", "mosh")],
+                          loginCredentialsAvailable=False)
+        except GatewayError as exc:
+            result.update(status="unavailable", error=exc.public())
+        with self.lock:
+            self._current(ctx, mid)
+            self.store.put("connection", ctx.account + ":" + mid, result)
         return result
 
     def _accept(self, ctx, mid, action):
@@ -364,7 +411,7 @@ class Gateway:
 
     def file(self, target, path, data=None):
         path = self.file_path(path)
-        require(data is None or isinstance(data, bytes) and len(data) <= MAX_FILE, "file_too_large", 413)
+        require(data is None or isinstance(data, bytes))
         ctx, mid = self._running(target)
         upload = data is not None
         row = self._accept(ctx, mid, "upload" if upload else "download")
@@ -385,6 +432,56 @@ class Gateway:
             if upload and exc.code == "invalid_upload_result":
                 exc.outcome = "UNKNOWN"
             self._finish(row, exc.outcome, error=exc.code)
+            raise
+
+    def upload(self, target, path, source, length):
+        path = self.file_path(path)
+        ctx, mid = self._running(target)
+        row = self._accept(ctx, mid, "upload")
+        body = source if isinstance(source, FileBody) else FileBody(source, length)
+        try:
+            status, result = self._call(ctx, "PUT", "/v1/machines/" + mid + "/files",
+                                        query={"path": path, "parents": "true"}, body=body, timeout=60)
+            require(body.transferred == length and type(result.get("created")) is bool
+                    and result["created"] == (status == 201) and type(result.get("size")) is int and result["size"] == length
+                    and result.get("sha256") == body.sha256.hexdigest(), "invalid_upload_result", 502)
+            self._finish(row, "SUCCEEDED", bytesTransferred=body.transferred)
+            return status, {k: result[k] for k in ("created", "size", "sha256")}, row["id"]
+        except GatewayError as exc:
+            if exc.code == "invalid_upload_result":
+                exc.outcome = "UNKNOWN"
+            exc.request_id = row["id"]
+            self._finish(row, exc.outcome, bytesTransferred=body.transferred, error=exc.code)
+            raise
+
+    def download(self, target, path):
+        return self._download(target, self.file_path(path))
+
+    @contextmanager
+    def _download(self, target, path):
+        """Open a bounded-memory download; the HTTP writer accounts for delivered bytes."""
+        ctx, mid = self._running(target)
+        row = self._accept(ctx, mid, "download")
+        row["bytesTransferred"] = 0
+        try:
+            _, response = self._call(ctx, "GET", "/v1/machines/" + mid + "/files/content",
+                                     query={"path": path}, binary=True, stream=True, timeout=60)
+            with response:
+                row["expectedBytes"] = int(response.headers["Content-Length"])
+                yield response, row
+                require(row["bytesTransferred"] == row["expectedBytes"], "incomplete_download", 502)
+            self._finish(row, "SUCCEEDED")
+        except GatewayError as exc:
+            exc.request_id = row["id"]
+            self._finish(row, "FAILED", error=exc.code)
+            raise
+        except (OSError, http.client.HTTPException):
+            self._finish(row, "FAILED", error="download_interrupted")
+            exc = GatewayError("download_interrupted", 502)
+            exc.request_id = row["id"]
+            raise exc from None
+        except Exception:
+            self._finish(row, "FAILED", error="download_failed")
             raise
 
     def resume(self, target, idempotency, allow_wake):

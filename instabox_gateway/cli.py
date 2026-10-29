@@ -5,12 +5,15 @@ import sqlite3
 from pathlib import Path
 import os
 import sys
+import webbrowser
+import time
 
 from cryptography.exceptions import InvalidTag
 
 from .errors import GatewayError
 from .runtime import ProcessLock, control_service, launch_background, read_instance, run_server
 from .store import Store
+from .auth import local_request
 
 
 def default_directory():
@@ -29,15 +32,35 @@ def main(argv=None):
     serve = sub.add_parser("serve", help="Unlock and start the local service in the background")
     serve.add_argument("--port", type=int, default=18761)
     serve.add_argument("--foreground", action="store_true", help="Keep serving in this terminal")
+    serve.add_argument("--open", action="store_true", help="Open a signed-in console after background startup")
     serve.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
-    sub.add_parser("status", help="Check the local service (requires the storage passphrase)")
+    sub.add_parser("status", help="Check local service identity; legacy services require a passphrase")
     sub.add_parser("stop", help="Stop this local service, without stopping upstream machines")
+    sub.add_parser("open", help="Open the running console, without copying a management token")
     token = sub.add_parser("token", help="Display a local Gateway token (never an upstream Key)")
     token.add_argument("role", choices=("admin", "execution"))
     args = parser.parse_args(argv)
+    args.data_dir = args.data_dir.expanduser().resolve()
     worker = args.command == "serve" and args._worker
     store = None
     try:
+        if args.command == "open":
+            record, reply = local_request(args.data_dir, "ticket")
+            webbrowser.open(f"http://127.0.0.1:{record['port']}/#login=" + reply["ticket"])
+            print("Opened the local console. The single-use login ticket expires in 60 seconds.")
+            return 0
+        if args.command in ("status", "stop") and (args.data_dir / "local-access.json").exists():
+            record, reply = local_request(args.data_dir, args.command)
+            if args.command == "status":
+                print(f"Running (PID {reply['pid']}): http://127.0.0.1:{reply['port']}")
+            else:
+                deadline = time.monotonic() + 45
+                while read_instance(args.data_dir) is not None:
+                    if time.monotonic() >= deadline:
+                        raise GatewayError("service_stop_timeout")
+                    time.sleep(.05)
+                print("Local service stopped. Upstream machines and processes were not stopped.")
+            return 0
         if args.command == "serve" and not 1 <= args.port <= 65535:
             raise GatewayError("invalid_port")
         if args.command in ("status", "stop") and read_instance(args.data_dir) is None:
@@ -89,6 +112,9 @@ def main(argv=None):
             del password
             print(f"InstaBox Gateway started in background (PID {result['pid']}): http://127.0.0.1:{args.port}")
             print("Use igw status or igw stop to manage this local service.")
+            if args.open:
+                record, reply = local_request(directory, "ticket")
+                webbrowser.open(f"http://127.0.0.1:{record['port']}/#login=" + reply["ticket"])
         return 0
     except KeyboardInterrupt:
         return 0

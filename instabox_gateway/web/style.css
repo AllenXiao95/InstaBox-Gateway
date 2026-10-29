@@ -14,3 +14,27 @@ main:focus{outline:none}#output-matches:empty{display:none}.nav-icon{height:22px
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.login-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:24px}.language-control{display:inline-flex;max-width:140px;flex-shrink:0}.language-select{font-size:14px;min-width:112px;padding:8px 10px}.topbar .language-control{max-width:130px}@media(max-width:767px){.language-select{font-size:16px;min-width:104px}.topbar .language-control{max-width:112px}.topbar code{min-width:0}}
 
 @media(max-width:767px){.topbar code{order:4;flex:0 0 auto;white-space:nowrap;font-size:11px}.connection{order:4;flex:1 1 180px;width:auto}}
+
+.task-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}.task-card{padding:16px;border:1px solid var(--border);border-radius:8px;overflow-wrap:anywhere}.task-card .inline-actions{margin-top:12px}#task-state,#task-log{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}#task-form textarea{min-height:76px}@media(max-width:900px){.task-grid{grid-template-columns:minmax(0,1fr)}}
+
+.feedback.info:not(:empty){background:var(--surface-muted);color:var(--text);border-color:var(--border)}#task-summary{margin-bottom:16px}#task-detail details{margin:16px 0}#task-detail summary{cursor:pointer;min-height:44px;padding:10px 0}
+
+#task-summary{overflow-wrap:anywhere;min-width:0}#task-detail,#task-detail details{min-width:0;max-width:100%}
+
+/* File lists share the console's spacing and native focus treatment. */
+.resource-row{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1rem 0;border-bottom:1px solid var(--border,#d6d8d5);min-width:0}
+.resource-row>div:first-child{min-width:0;flex:1}.resource-row strong,.resource-row p{overflow-wrap:anywhere}.resource-row p{margin:.3rem 0 0}.resource-row .inline-actions{flex-shrink:0;flex-wrap:wrap}
+.button-link{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:.55rem .9rem;border:1px solid currentColor;border-radius:8px;text-decoration:none;font-weight:600;font-size:.875rem;white-space:nowrap}
+.button-link[hidden]{display:none}#drive-browser,#drive-read-list,#files-list,#drive-imports,#drive-uploads{margin-top:1rem}#files-path{overflow-wrap:anywhere}#drive-preview:empty{display:none}
+@media(max-width:640px){.resource-row{align-items:flex-start;flex-direction:column}.resource-row .inline-actions{width:100%}.resource-row .inline-actions>*{flex:1}#drive-config{max-width:100%}}
+#files-location,#drive-breadcrumb{overflow-wrap:anywhere;white-space:normal}#drive-preview{max-height:520px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* Two independent file panes: local destination and read-only remote /data. */
+.file-panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start}
+.file-pane{padding:20px;min-width:0}.file-pane h2{font-size:18px}.file-path-form{margin:16px 0 12px}.file-path-form>div{display:flex;gap:8px;min-width:0}.file-path-form input{min-width:0;flex:1}.file-path-form button{flex-shrink:0}.file-tools{margin-bottom:12px}.file-entries{min-height:240px;max-height:560px;overflow:auto;border-top:1px solid var(--border);margin-top:16px}
+.file-entry{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 4px;border-bottom:1px solid var(--border);min-width:0}.file-entry-info{min-width:0;flex:1}.file-entry strong,.file-entry p,.file-transfer p,.file-transfer strong,#files-local-location{overflow-wrap:anywhere}.file-entry p{margin:4px 0 0;font-size:12px}.file-entry>button{flex-shrink:0;font-size:12px;padding:8px 10px}.file-folder{background:transparent;color:var(--primary);padding:0;text-align:left;white-space:normal;overflow-wrap:anywhere;max-width:100%;min-height:44px}.file-folder:hover{background:var(--primary-soft);color:var(--primary)}
+.file-transfer{border-top:1px solid var(--border);padding:16px 0}.file-transfer>.section-heading{margin-bottom:8px}.file-transfer p{margin:6px 0;font-size:13px}.file-transfer progress{display:block;width:100%;height:10px;margin:12px 0;accent-color:var(--primary)}.file-transfer button{margin-top:8px}.file-transfer .feedback{padding:8px 12px}
+@media(max-width:850px){.file-panels{grid-template-columns:minmax(0,1fr)}.file-entries{min-height:120px;max-height:380px}}@media(max-width:480px){.file-entry{flex-wrap:wrap}.file-entry-info{flex-basis:100%}.file-entry>button{width:100%}.file-pane{padding:16px}.file-path-form input{font-size:16px}}
+
+/* OAuth setup stays secondary to the one-click sign-in flow. */
+.drive-setup-steps{padding-left:24px;line-height:1.7}.drive-setup-steps li{margin:10px 0;overflow-wrap:anywhere}#drive-config-state{overflow-wrap:anywhere}#drive-setup{margin-top:20px}#drive-setup form{max-width:100%}#drive-setup input[type=file]{max-width:100%}
