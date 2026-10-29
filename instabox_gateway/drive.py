@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import json
+import os
+from pathlib import Path
 import re
 import secrets
 import shutil
@@ -22,6 +24,7 @@ from .gateway import fields, require, text
 from .store import now
 from .upstream import NoRedirect, Upstream
 from .transfer import CHUNK, FileBody
+from .auth import read_private
 
 READ = "https://www.googleapis.com/auth/drive.readonly"
 WRITE = "https://www.googleapis.com/auth/drive.file"
@@ -88,6 +91,21 @@ class Drive:
         self.oauth_status = "idle"
         self.stop_event = threading.Event()
         self.thread = None
+        self.configuration_error = None
+        # Maintainers can provision the app identity once, outside the checkout.
+        # Existing encrypted configuration always wins; never rotate a live client.
+        application_client = os.environ.get("IGW_GOOGLE_OAUTH_CLIENT_FILE")
+        if application_client and not self._secret("config"):
+            try:
+                path = Path(application_client).expanduser().resolve(strict=True)
+                require(not any((p / ".git").exists() for p in (path.parent, *path.parents)),
+                        "drive_config_must_be_outside_repository")
+                require(path.stat().st_size <= 65536, "drive_invalid_application_config")
+                self.configure(read_private(path), source="application")
+            except GatewayError as exc:
+                self.configuration_error = exc.code
+            except (OSError, ValueError, UnicodeError):
+                self.configuration_error = "drive_invalid_application_config"
 
     def _secret(self, key):
         value = self.g.store.get("drive_secret", key)
@@ -98,14 +116,20 @@ class Drive:
 
     def status(self):
         connection = self._secret("connection")
-        return dict(configured=self._secret("config") is not None, connected=bool(connection),
+        pending = self.pending
+        configured = self._secret("config") is not None
+        metadata = self.g.store.get("drive_config", "source") or {}
+        return dict(configured=configured, connected=bool(connection),
+                    configurationSource=metadata.get("source", "custom") if configured else "missing",
+                    configurationError=self.configuration_error,
+                    authorizationExpiresAt=pending["expiresAt"] if pending else None,
                     connectionId=connection["id"] if connection else None,
                     user=connection.get("user") if connection else None,
                     uploadEnabled=bool(connection and (WRITE in connection["scopes"] or connection.get("uploadTokens"))),
                     oauthStatus=self.oauth_status, maxFileBytes=None)
 
-    def configure(self, body):
-        fields(body, ("installed",))
+    def configure(self, body, *, source="custom"):
+        require(isinstance(body, dict) and set(body) == {"installed"}, "drive_desktop_client_required")
         client = body.get("installed")
         require(isinstance(client, dict), "drive_desktop_client_required")
         client_id = text(client.get("client_id"), 256)
@@ -115,6 +139,8 @@ class Drive:
             require(not self.pending, "drive_login_pending", 409)
             require(not self._secret("connection"), "drive_disconnect_first", 409)
             self._save_secret("config", config)
+            self.g.store.put("drive_config", "source", {"source": source})
+            self.configuration_error = None
         return self.status()
 
     def connect(self, body):
@@ -148,12 +174,18 @@ class Drive:
                         self.send_error(400)
                         return
                     self.server.callback = query
-                    page = b"<!doctype html><meta name=referrer content=no-referrer><title>InstaBox Gateway</title><p>Authorization received. You can close this tab and return to InstaBox Gateway.</p>"
+                    nonce = secrets.token_hex(16)
+                    page = ("<!doctype html><html lang=en><meta charset=utf-8><meta name=referrer content=no-referrer>"
+                            "<title>InstaBox Gateway</title><h1>Return to InstaBox Gateway</h1>"
+                            "<p>Authorization received. Gateway is verifying the result. "
+                            "The console updates automatically; you can close this tab.</p>"
+                            "<p lang=zh-CN>已收到授权回调，Gateway 正在核对结果。控制台会自动更新，可以关闭本页。</p>"
+                            f'<script nonce="{nonce}">window.close();</script></html>').encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(page)))
                     self.send_header("Cache-Control", "no-store")
-                    self.send_header("Content-Security-Policy", "default-src 'none'")
+                    self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'nonce-" + nonce + "'; frame-ancestors 'none'")
                     self.end_headers()
                     self.wfile.write(page)
 
@@ -162,7 +194,7 @@ class Drive:
             server.callback = None
             redirect = "http://127.0.0.1:" + str(server.server_port)
             attempt = dict(server=server, config=config, verifier=verifier, state=state, redirect=redirect, scopes=scopes,
-                           folder=folder, connectionId=connection["id"] if connection else None)
+                           folder=folder, connectionId=connection["id"] if connection else None, expiresAt=time.time() + 300)
             self.pending, self.oauth_status = attempt, "waiting"
             threading.Thread(target=self._authorize, args=(attempt,), name="igw-google-oauth", daemon=True).start()
             parameters = dict(
