@@ -138,15 +138,34 @@ igw-client task events
 
 ## 文件浏览与 Google Drive
 
-在控制台打开 **工作区文件**，选择已登记工作区，或先在实例页固定机器，再选择该机器的持久化根目录（`fileRoot`）。支持目录导航和文件下载，复用现有流式下载 API，交给浏览器下载管理器处理，使用有界缓冲区，不设 Gateway 单文件大小上限。目录不自动打包、不跟随符号链接、不主动恢复机器，也暂不支持 HTTP Range 续传。
+在控制台打开 **文件管理**：左侧浏览 Gateway 所在本机的目录，右侧直接选择运行中的 InstaBox 机器并浏览 `/data`。无需登记工作区，不受执行用 `fileRoot` 限制。两侧支持独立路径跳转、上一级和分页。点击远端文件的 **下载到左侧**，文件将写入受理时左侧所在的目录。
 
-私有 Google Drive 的连接步骤：
+下载由本地 Gateway 后台进行，关闭网页或切换机器不影响已受理传输；页面显示字节进度、结果及收到内容的 SHA256。使用有界缓冲区，不设 Gateway 单文件大小上限，不覆盖已有文件；失败的临时文件不发布。停止 Gateway 会中断传输，暂不支持 Range/自动续传。目录不打包、不跟随远端符号链接、不主动恢复机器；机器保护清单始终生效。
 
-1. 在自己的 Google Cloud 项目启用 Drive API，配置同意页面和测试用户，创建 **Desktop app** 类型 OAuth 客户端。
-2. 将客户端 JSON 下载到仓库外，在 **Google Drive → 首次连接设置** 选择并保存。配置和 Google 令牌使用已有本地存储加密保存。
-3. 点击 **登录 Google → 继续 Google 授权**，在系统浏览器完成授权，再刷新连接。初次连接仅请求只读权限。
-4. 浏览“我的云端硬盘”或“与我共享”，明确批准读取文件/目录。指定已有上传文件夹时，会进入单独的 Google Picker 授权（仅 `drive.file`），需要确认同一 Google 账号与原目标目录；此步骤还需在同一 Cloud 项目启用 Google Picker API。受信执行客户端只能访问已批准的内容，无法取得 Google 令牌。
-5. 支持按需在线读取、单文件下载、后台递归快照到固定工作区，以及向批准文件夹新增本地文件。没有覆盖、删除和移动入口。
+本机目录浏览、远端 `/data` 浏览和本地下载接口位于 `/api/admin/files/`，仅管理会话/管理 Token 可访问。执行客户端的 `fileRoot` 与固定工作区限制保持不变。
+
+私有 Google Drive 使用 Google 网页 OAuth 授权。应用身份配置完成后，点击 **登录 Google** 即会打开官方授权页；完成、拒绝或过期都会自动更新到控制台，无需手动刷新。新标签页被拦截时，使用 **继续 Google 授权** 链接。配置成功后高级设置默认收起，正常使用不需要重复上传客户端 JSON。
+
+首次配置由应用维护者完成一次；当前源码不包含真实 OAuth 应用凭据。尚未配置时，控制台会明确提示并提供 **配置 Google 登录 → 维护者设置（高级）**。
+
+1. 打开 [Google Cloud Drive API 页面](https://console.cloud.google.com/apis/library/drive.googleapis.com)，创建或选择自己的项目并启用 **Google Drive API**。
+2. 在 **Google Auth Platform** 配置 **Branding**（应用名、支持及联系邮箱）、**Audience**（个人 Google 账号选择 External；测试阶段把自己的邮箱加入 Test users）和 **Data Access**。递归读取申请 `https://www.googleapis.com/auth/drive.readonly`；向所选文件夹新增上传时，Gateway 会另行请求 `https://www.googleapis.com/auth/drive.file`，并需要在同一项目启用 **Google Picker API**。
+3. 在 [Clients](https://console.cloud.google.com/auth/clients) 创建 **Desktop app** 类型的 OAuth 客户端，下载 JSON。不要选择 Web application，也不要把 JSON、Client Secret 或 Google 令牌放入 Git。
+4. 将 JSON 存在仓库外，在控制台高级设置中导入一次。配置和令牌会存入现有本机加密存储；这一步不会代替 Google 网页授权。
+5. 点击 **登录 Google**，在 Google 网页选择账号并授予读取权限；返回控制台后浏览“我的云端硬盘”或“与我共享”，批准具体文件/目录。设置上传文件夹时会再次进入 Google Picker，只授权原账号和原目标文件夹。
+
+维护者也可在首次启动时预配置应用，省去网页 JSON 导入。macOS/Linux 示例（使用自己的仓库外绝对路径）：
+
+```bash
+chmod 600 /absolute/private/google-drive-client.json
+IGW_GOOGLE_OAUTH_CLIENT_FILE=/absolute/private/google-drive-client.json igw serve --open
+```
+
+如果本机需要 `IGW_UPSTREAM_PROXY`、`SSL_CERT_FILE` 等已有设置，在原启动命令中同时保留它们。预配置文件必须位于 Git 仓库外，且在 POSIX 系统上权限为 0600；Windows 应限制其 ACL。启动时只在尚无本地 OAuth 配置时导入，已有配置与连接不会被环境文件覆盖；成功导入后保存在加密存储中，后续启动无需再次传入。文件不可用时只阻止 Drive 登录，其他 Gateway 功能继续可用。
+
+同一个维护者注册的应用可以供其获准用户授权，不要求每位使用者自行创建 Google Cloud 项目；每个本地 Gateway 仍需获得维护者提供的应用配置。公开分发和受限权限的验证要求请以 [Google OAuth 政策](https://developers.google.com/identity/protocols/oauth2/policies)及 [Drive 权限说明](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)为准。测试模式或组织策略可能限制可登录账号。
+
+支持按需在线读取、单文件下载、后台递归快照到固定工作区，以及向批准文件夹新增本地文件。受信执行客户端只能访问已批准的内容，无法取得 Google 令牌；没有覆盖、删除和移动入口。
 
 `drive.readonly` 在 Google 授权层可读取整个 Drive，所选范围限制由 Gateway 实施。`drive.file` 本身还允许修改应用获准访问的文件，但 Gateway 本轮只提供新增上传。目标目录仍受 Google 权限约束；拒绝时明确失败，不自动扩大 scope。断开连接会清除本地令牌，Google 账号侧授权需在其安全设置中撤销。在线读取由本地 Gateway 直接连接 Google，只有快照才会进一步发送到 InstaBox 工作区。
 

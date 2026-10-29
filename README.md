@@ -140,15 +140,34 @@ Completion, failure and blocking events appear in **Background tasks**. macOS no
 
 ## Files and Google Drive
 
-Open **Workspace files** in the console. Select a registered workspace, or bind a machine on **Instances** and choose its persistent root (`fileRoot`). Browse folders and click **Download**. Downloads go directly to the browser download manager through the existing streaming API; they use bounded buffers without a Gateway file-size cap. Symlinks are not downloadable. Browsing never actively resumes a machine. Folder archives and HTTP Range resume are not included.
+Open **File manager** in the console. The left pane browses directories on the computer running Gateway; the right pane selects a running InstaBox machine and browses `/data`. No workspace registration is needed, and browsing is independent of the execution `fileRoot`. Both panes have their own path navigation and pagination. Click **Download to local** to save a remote file into the directory shown on the left when the download is accepted.
 
-For private Google Drive access:
+Downloads run in the local Gateway background. Closing the page or switching machines does not redirect or cancel an accepted download. The transfer list shows byte progress, results, and the SHA256 of the received bytes. Transfers use bounded buffers without a Gateway file-size cap. Existing files are never overwritten, and incomplete temporary files are not published. Stopping Gateway interrupts transfers; HTTP Range/automatic resume and folder archives are not included. Remote symlinks are not followed, browsing never actively resumes a machine, and machine protection rules still apply.
 
-1. Enable the Google Drive API in your Google Cloud project. Configure the consent audience/test users and create a **Desktop app** OAuth client.
-2. Download its client JSON outside this checkout. In **Google Drive → First-time setup**, select the JSON and save it. The Gateway encrypts the client configuration and tokens in its existing local store.
-3. Click **Sign in to Google**, then **Continue Google authorization**. Use your system browser to grant access and refresh the connection afterwards. The initial connection requests read-only access.
-4. Browse **My Drive** or **Shared with me** and explicitly approve read selections. To approve an existing upload folder, complete the separate Google Picker authorization (`drive.file` only) using the same Google account and exact folder. Enable the Google Picker API in the same Cloud project for this step. Trusted execution clients can access only these approved selections; they receive no Google token.
-5. Read selected text on demand, download a file, or import a recursive snapshot into a fixed workspace. Uploads add new files to an approved folder; they do not overwrite, delete or move existing files.
+Local browsing, remote `/data` browsing, and downloads to local disk use `/api/admin/files/` and require an owner management session or admin token. Execution clients retain their existing `fileRoot` and fixed-workspace boundaries.
+
+Private Google Drive access uses OAuth on Google's website. Once the app identity is configured, click **Sign in to Google** to open authorization. The console automatically detects success, denial, or expiration; no manual refresh is needed. If a new tab is blocked, use **Continue Google authorization**. Advanced setup is secondary and does not need to be repeated for normal sign-ins.
+
+The maintainer configures the app identity once. This checkout contains no real OAuth app credentials. An unconfigured installation shows **Set up Google sign-in → Maintainer setup (advanced)**.
+
+1. Create or select a Google Cloud project and enable the [Google Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com).
+2. In **Google Auth Platform**, configure **Branding**, **Audience**, and **Data Access**. Personal Google accounts use an External audience; add your account under Test users during testing. Recursive reads use `https://www.googleapis.com/auth/drive.readonly`. Upload-folder approval separately requests `https://www.googleapis.com/auth/drive.file` and requires the **Google Picker API** enabled in the same project.
+3. Create a **Desktop app** OAuth client under [Clients](https://console.cloud.google.com/auth/clients) and download its JSON. Do not select Web application. Keep client credentials and Google tokens outside Git.
+4. Import the JSON once in the console's advanced maintainer setup. The configuration and tokens are encrypted in the existing local store. This setup does not replace Google's consent step.
+5. Click **Sign in to Google**, select your account, and grant read access on Google. The console then browses My Drive or Shared with me. Explicitly approve read selections. Upload-folder approval opens Google Picker and requires the same account and exact destination folder.
+
+Maintainers can also provision the application identity at the first startup instead of importing JSON through the web UI. On macOS/Linux, use your own absolute path outside the repository:
+
+```bash
+chmod 600 /absolute/private/google-drive-client.json
+IGW_GOOGLE_OAUTH_CLIENT_FILE=/absolute/private/google-drive-client.json igw serve --open
+```
+
+Preserve any existing `IGW_UPSTREAM_PROXY`, `SSL_CERT_FILE`, or other required startup settings. The file must be outside Git repositories with owner-only POSIX permissions; restrict its ACL on Windows. Import occurs only when no encrypted OAuth configuration already exists. Existing client configuration and connections are never replaced by this environment setting. After successful import, subsequent launches use encrypted storage without the variable. Invalid provisioning blocks Drive sign-in while other Gateway features remain available.
+
+One maintainer-registered app can serve its permitted users without each user creating a Google Cloud project; each local installation still needs the maintainer-provided app configuration. Public distribution and restricted scopes are subject to [Google OAuth policies](https://developers.google.com/identity/protocols/oauth2/policies) and [Drive scope requirements](https://developers.google.com/workspace/drive/api/guides/api-specific-auth). Testing mode or organizational policy may limit which accounts can sign in.
+
+Online reads, file downloads, background recursive snapshots to a fixed workspace, and new-file uploads to approved folders are supported. Trusted execution clients see only approved selections and never receive Google tokens. Overwrite, delete, and move operations are not exposed.
 
 `drive.readonly` permits reading the entire Drive at the Google authorization layer; selection restrictions are enforced by this application. `drive.file` also permits modifications to app-authorized files, but this application exposes only new-file uploads. Google still enforces folder permissions; a denial does not trigger broader authorization. Disconnecting removes local tokens; revoke the Google account grant separately in Google’s security settings. Online reads connect from the local Gateway directly to Google; only snapshots are then sent to the remote workspace.
 
