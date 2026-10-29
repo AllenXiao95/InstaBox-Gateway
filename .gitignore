@@ -1,5 +1,6 @@
 # Local research, verification tools and reports — never publish.
 /.local/
+/artifacts/
 /reports/
 /docs/
 /tests/
@@ -12,6 +13,9 @@
 .env
 .env.*
 *.env
+client_secret*.json
+google-oauth*.json
+google-drive-token*.json
 *.pem
 *.key
 .instabox-known-hosts
