@@ -8,11 +8,11 @@ import time
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, quote
 
 from .errors import GatewayError
 from .gateway import fields, require
-from .upstream import MAX_FILE
+from .transfer import FileBody
 from .auth import BrowserAuth
 
 
@@ -58,16 +58,20 @@ class Handler(BaseHTTPRequestHandler):
     def _headers(self, status, length, content_type, request_id=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(length))
+        if length is not None:
+            self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        if getattr(self, "_attachment", None):
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(self._attachment, safe=""))
         if request_id:
             self.send_header("X-Gateway-Request-Id", request_id)
         if getattr(self, "_cookie", None):
             self.send_header("Set-Cookie", self._cookie)
         self.end_headers()
+        self._response_started = True
 
     def _body(self, binary=False):
         require(not self.headers.get("Transfer-Encoding"), "transfer_encoding_unsupported")
@@ -75,12 +79,13 @@ class Handler(BaseHTTPRequestHandler):
         require(raw_length.isdecimal(), "invalid_content_length")
         require(len(self.headers.get_all("Content-Length", [])) <= 1, "invalid_content_length")
         length = int(raw_length)
-        require(length <= (MAX_FILE if binary else 2 * 1024 * 1024), "request_too_large", 413)
-        raw = self.rfile.read(length)
-        require(len(raw) == length, "incomplete_body")
         if binary:
             require(self.headers.get_content_type() == "application/octet-stream", "content_type_required", 415)
-            return raw
+            self.connection.settimeout(60)
+            return FileBody(self.rfile, length)
+        require(length <= 2 * 1024 * 1024, "request_too_large", 413)
+        raw = self.rfile.read(length)
+        require(len(raw) == length, "incomplete_body")
         require(self.headers.get_content_type() == "application/json", "content_type_required", 415)
         try:
             result = json.loads(raw)
@@ -141,6 +146,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/i18n.js": ("i18n.js", "text/javascript; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/tasks.js": ("tasks.js", "text/javascript; charset=utf-8"),
+                  "/files.js": ("files.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8")}
         if method == "GET" and path in static:
             name, mime = static[path]
@@ -192,6 +198,15 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         g = self.server.gateway
+        match = re.fullmatch(r"/api/v1/workspaces/(w_[a-z0-9]+)/files", path)
+        if match and method == "GET":
+            fields(q, ("path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.workspaces.list_files(match[1], q.get("path", "."), int(q.get("offset", "0"))))
+        if path == "/api/v1/persistent-files" and method == "GET":
+            fields(q, ("bindingId", "path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.workspaces.list_persistent(q.get("bindingId"), q.get("path", "."), int(q.get("offset", "0"))))
         if path == "/api/v1/workspaces":
             if method == "GET":
                 return self._send(200, {"workspaces": g.store.rows("workspace")})
@@ -269,16 +284,42 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("mode") == "sync":
                 body.pop("mode")
             return self._send(200, g.execute(body))
-        if path == "/api/v1/file" and method in ("GET", "PUT"):
-            fields(q, ("bindingId", "accountId", "machineId", "workspaceId", "path"))
-            if "workspaceId" in q:
+        if path == "/api/v1/connection-info" and method == "GET":
+            return self._send(200, g.connection_info(q))
+        if path in ("/api/v1/file", "/api/v1/persistent-file") and method in ("GET", "PUT"):
+            fields(q, ("bindingId", "accountId", "machineId", "workspaceId", "path", "download"))
+            attachment = q.pop("download", None)
+            require(attachment is None or method == "GET" and attachment == "1", "invalid_download_option")
+            if path == "/api/v1/persistent-file":
+                require(method == "GET" and set(q) == {"bindingId", "path"}, "invalid_request")
+                target = {"bindingId": q["bindingId"]}
+                remote_path = g.workspaces.persistent_path(q["bindingId"], q["path"])
+            elif "workspaceId" in q:
                 require(set(q) == {"workspaceId", "path"}, "workspace_target_conflict")
                 target, remote_path = g.workspaces.file_path(q["workspaceId"], q["path"])
             else:
                 target = {k: v for k, v in q.items() if k != "path"}
                 remote_path = q.get("path")
+            if method == "GET":
+                if attachment:
+                    self._attachment = remote_path.rsplit("/", 1)[-1]
+                require(not self.headers.get("Range") and not self.headers.get("If-Range"),
+                        "range_not_supported")
+                deadline = time.monotonic() + 7200
+                self.connection.settimeout(60)
+                with g.download(target, remote_path) as (response, row):
+                    remaining = row["expectedBytes"]
+                    self._headers(200, remaining, "application/octet-stream", row["id"])
+                    while remaining:
+                        require(time.monotonic() < deadline, "download_deadline_exceeded", 504)
+                        chunk = response.read(min(64 * 1024, remaining))
+                        require(bool(chunk), "incomplete_download", 502)
+                        self.wfile.write(chunk)
+                        row["bytesTransferred"] += len(chunk)
+                        remaining -= len(chunk)
+                return
             data = self._body(binary=True) if method == "PUT" else None
-            status, result, request_id = g.file(target, remote_path, data)
+            status, result, request_id = g.upload(target, remote_path, data, data.length)
             return self._send(status, result, "application/json" if method == "PUT" else "application/octet-stream", request_id)
         if path == "/api/v1/resumes" and method == "POST":
             body = self._body()
@@ -290,13 +331,16 @@ class Handler(BaseHTTPRequestHandler):
         raise GatewayError("route_not_found", 404)
 
     def _handle(self):
+        self._response_started = False
         try:
             self._dispatch()
         except GatewayError as exc:
-            self._send(exc.status, {"error": exc.public()})
+            if not self._response_started:
+                self._send(exc.status, {"error": exc.public()})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
         except Exception:
-            self._send(500, {"error": {"code": "internal_error", "outcome": "UNKNOWN"}})
+            if not self._response_started:
+                self._send(500, {"error": {"code": "internal_error", "outcome": "UNKNOWN"}})
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _handle

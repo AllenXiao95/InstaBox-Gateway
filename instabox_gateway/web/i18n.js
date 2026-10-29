@@ -2,8 +2,20 @@
 // Chinese source messages are stable gettext-style message IDs.
 (() => {
 const english = {
+  "当前固定目标的持久化根目录": "Persistent root on the current fixed target",
+  "上一级": "Parent folder",
+  "下一页": "Next page",
+  "下载": "Download",
+  "仅浏览登记目录；不主动唤醒机器。符号链接不可下载，目录暂不打包。": "Only registered directories are accessible. Machines are not actively resumed. Symlinks cannot be downloaded; folder archives are not available.",
   "刷新": "Refresh",
+  "工作区文件": "Workspace files",
+  "打开目录": "Open folder",
+  "浏览已登记的固定工作区，下载远端持久化文件。": "Browse registered workspaces and download persistent remote files.",
+  "目录为空。": "This folder is empty.",
+  "目录已更新；下载由浏览器管理。": "Folder refreshed. Your browser manages downloads.",
+  "符号链接：不可访问": "Symlink: access disabled",
   "续跑": "Resume",
+  "请先在后台任务页登记工作区。": "Register a workspace on the Background tasks page first.",
   "请选择": "Select an option",
   "工作区目录或仓库检查未通过，请核对路径、符号链接和机器状态。": "Workspace directory or repository checks failed. Check paths, symlinks and machine state.",
   "路径必须在固定工作区内，不能通过符号链接访问外部。": "Paths must stay in the fixed workspace, including symlink targets.",

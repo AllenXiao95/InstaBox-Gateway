@@ -1,10 +1,15 @@
 """Thin HTTP client for local Codex/scripts; only uses a Gateway execution token."""
 import argparse
 import getpass
+import hashlib
+import http.client
 import json
 import os
+import re
 from pathlib import Path
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,6 +17,7 @@ import uuid
 
 from .auth import local_request, private_json, read_private
 from .errors import GatewayError
+from .transfer import FileBody
 
 
 def main(argv=None):
@@ -25,6 +31,7 @@ def main(argv=None):
     parser.add_argument("--workspace", help="Fixed workspace ID; defaults to the paired profile")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("machines")
+    sub.add_parser("connection-info")
     sub.add_parser("login", help="Pair once with the running, unlocked local service")
     sub.add_parser("logout", help="Remove this CLI's saved execution credential")
     sub.add_parser("use", help="Save a default workspace for this CLI profile").add_argument("id")
@@ -63,6 +70,9 @@ def main(argv=None):
         file = sub.add_parser(action)
         file.add_argument("local", type=Path)
         file.add_argument("remote")
+        if action == "download":
+            file.add_argument("--sha256", help="Expected SHA256; verified before publishing the file")
+            file.add_argument("--timeout", type=float, default=75, help="Socket inactivity timeout in seconds (default: 75)")
     resume = sub.add_parser("resume")
     resume.add_argument("--idempotency-key", required=True)
     resume.add_argument("--allow-wake", action="store_true", required=True)
@@ -89,11 +99,16 @@ def main(argv=None):
     except (OSError, ValueError, GatewayError) as exc:
         print(getattr(exc, "code", "local_pairing_failed") + "; start/unlock Gateway and check the data directory", file=sys.stderr)
         return 1
-    use_default = args.action in ("exec", "test", "git", "upload", "download", "resume") or args.action == "task" and args.operation in ("start", "watch")
+    use_default = args.action in ("exec", "test", "git", "upload", "download", "resume", "connection-info") or args.action == "task" and args.operation in ("start", "watch")
     if use_default and not (args.binding or args.account or args.machine or args.workspace):
         args.workspace = profile.get("workspaceId")
     if args.action == "select" and args.workspace:
         parser.error("A workspace is already fixed; select creates a new binding without --workspace")
+    if args.action == "download":
+        if args.sha256 is not None and (len(args.sha256) != 64 or any(c not in "0123456789abcdefABCDEF" for c in args.sha256)):
+            parser.error("--sha256 must contain 64 hexadecimal characters")
+        if not 0 < args.timeout <= 7200:
+            parser.error("--timeout must be between 0 and 7200 seconds")
     try:
         url = urllib.parse.urlsplit(args.url)
         if url.port is not None and not 1 <= url.port <= 65535:
@@ -106,7 +121,7 @@ def main(argv=None):
         parser.error("Use either binding or account + machine")
     if args.workspace and (args.binding or args.account or args.machine):
         parser.error("Use a workspace or an explicit target, never both")
-    if args.action in ("exec", "upload", "download", "resume") and not (args.workspace or args.binding or args.account and args.machine):
+    if args.action in ("exec", "upload", "download", "resume", "connection-info") and not (args.workspace or args.binding or args.account and args.machine):
         parser.error("An explicit account + machine or binding is required")
     paired_token = profile.get("token") if profile.get("url") == args.url.rstrip("/") else None
     token = os.environ.get("IGW_TOKEN") or paired_token or getpass.getpass("Gateway execution token: ")
@@ -156,10 +171,10 @@ def main(argv=None):
             if base != local and base not in local.parents:
                 parser.error("Local file must be inside the workspace localRoot")
         if args.action == "upload":
-            if args.local.stat().st_size > 8 * 1024 * 1024:
-                parser.error("file exceeds Gateway 8 MiB limit")
-            body, method = args.local.read_bytes(), "PUT"
+            method = "PUT"
             headers["Content-Type"] = "application/octet-stream"
+    elif args.action == "connection-info":
+        path = "/api/v1/connection-info?" + urllib.parse.urlencode(target)
     elif args.action == "resume":
         body, method, path = {"target": target, "allowWake": args.allow_wake}, "POST", "/api/v1/resumes"
         headers["Idempotency-Key"] = args.idempotency_key
@@ -235,32 +250,84 @@ def main(argv=None):
     if isinstance(body, dict):
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(args.url.rstrip("/") + path, data=data, method=method, headers=headers)
-    from .upstream import NoRedirect
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    upload_source = None
     try:
-        with opener.open(req, timeout=150) as response:
+        if args.action == "upload":
+            upload_source = args.local.open("rb")
+            data = FileBody(upload_source, os.fstat(upload_source.fileno()).st_size)
+            headers["Content-Length"] = str(data.length)
+        req = urllib.request.Request(args.url.rstrip("/") + path, data=data, method=method, headers=headers)
+        if args.action == "download" and os.path.lexists(args.local):
+            print("download_destination_exists", file=sys.stderr)
+            return 1
+        started = time.monotonic()
+        with opener.open(req, timeout=args.timeout if args.action == "download" else 150) as response:
+            if args.action == "download":
+                lengths = response.headers.get_all("Content-Length", [])
+                if (response.status != 200 or len(lengths) != 1 or not lengths[0].isascii()
+                        or not lengths[0].isdecimal() or len(lengths[0]) > 20
+                        or response.headers.get("Transfer-Encoding")
+                        or response.headers.get("Content-Encoding", "identity") != "identity"):
+                    raise ValueError("invalid download response")
+                expected, received = int(lengths[0]), 0
+                digest = hashlib.sha256()
+                fd, name = tempfile.mkstemp(prefix="." + args.local.name + ".", suffix=".part", dir=args.local.parent)
+                part = Path(name)
+                # Keep incomplete files, but never treat them as resumable or complete.
+                print("Downloading to " + str(part), file=sys.stderr)
+                with os.fdopen(fd, "wb") as out:
+                    while received < expected:
+                        if time.monotonic() - started >= 7200:
+                            raise ValueError("download deadline exceeded")
+                        chunk = response.read(min(64 * 1024, expected - received))
+                        if not chunk:
+                            raise ValueError("incomplete download")
+                        out.write(chunk)
+                        digest.update(chunk)
+                        received += len(chunk)
+                checksum = digest.hexdigest()
+                if args.sha256 and checksum != args.sha256.lower():
+                    print("download_sha256_mismatch; incomplete file retained: " + str(part), file=sys.stderr)
+                    return 1
+                # POSIX rename replaces existing files; a hard link publishes without
+                # overwriting a destination created while the transfer was running.
+                if os.name == "nt":
+                    os.rename(part, args.local)
+                else:
+                    os.link(part, args.local)
+                    part.unlink()
+                print(json.dumps({"bytes": received, "sha256": checksum,
+                                  "checksumVerified": bool(args.sha256)}))
+                return 0
             result = response.read(16 * 1024 * 1024 + 1)
             if len(result) > 16 * 1024 * 1024:
                 print("gateway_response_too_large", file=sys.stderr)
                 return 1
-            if args.action == "download":
-                # Never overwrite an existing local file implicitly.
-                with args.local.open("xb") as out:
-                    out.write(result)
-                return 0
             value = json.loads(result)
+            if args.action == "upload" and (data.transferred != data.length or value.get("size") != data.length or value.get("sha256") != data.sha256.hexdigest()):
+                raise ValueError("upload checksum mismatch")
             print(json.dumps(value, ensure_ascii=True))
-            if args.action in ("exec", "test", "git"):
+            if args.action in ("exec", "test", "git") and "result" in value:
                 code = value["result"]["exitCode"]
                 return code if 0 <= code <= 255 else 1
             return 0
     except urllib.error.HTTPError as exc:
         print("Gateway HTTP " + str(exc.code), file=sys.stderr)
+        try:
+            error = json.loads(exc.read(65536)).get("error", {})
+            safe = {k: v for k, v in error.items() if k in ("code", "outcome", "requestId")
+                    and isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", v)}
+            if safe:
+                print(json.dumps(safe), file=sys.stderr)
+        except (ValueError, AttributeError):
+            pass
         return 1
-    except (OSError, urllib.error.URLError, ValueError):
+    except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError):
         print("gateway_request_or_local_file_failed; do not automatically retry writes", file=sys.stderr)
         return 1
+    finally:
+        if upload_source:
+            upload_source.close()
 
 
 if __name__ == "__main__":

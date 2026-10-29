@@ -78,3 +78,57 @@ class Workspaces:
                 and all(p not in ("", ".", "..") for p in value.split("/")), "workspace_path_denied", 403)
         probe = self.probe(workspace, path=value)
         return {"bindingId": workspace["bindingId"]}, probe["path"]
+
+    def persistent_path(self, binding_id, path, *, directory=False):
+        self.g._resolve({"bindingId": text(binding_id, 100)})
+        path = text(path)
+        require(path == "." and directory or not path.startswith("/") and posixpath.normpath(path) == path
+                and all(p not in ("", ".", "..") for p in path.split("/")), "workspace_path_denied", 403)
+        root = self.g.settings()["fileRoot"]
+        absolute = root if path == "." else root + "/" + path
+        script = """import pathlib,sys
+root,p=map(pathlib.Path,sys.argv[1:3])
+assert root.resolve()==root and p.resolve()==p
+assert p==root or root in p.parents
+assert p.is_dir() if sys.argv[3]=='directory' else p.is_file()
+"""
+        result = self.g.execute(dict(target={"bindingId": binding_id}, argv=["python3", "-c", script, root, absolute, "directory" if directory else "file"]))
+        require(result["outcome"] == "SUCCEEDED", "workspace_path_denied", 403)
+        return absolute
+
+    def list_persistent(self, binding_id, path=".", offset=0):
+        absolute = self.persistent_path(binding_id, path, directory=True)
+        return self._list_files(binding_id, self.g.settings()["fileRoot"], path, absolute, offset)
+
+    def list_files(self, ident, path=".", offset=0):
+        workspace = self.get(ident)
+        require(type(offset) is int and 0 <= offset <= 100000, "invalid_offset")
+        if path == ".":
+            self.probe(workspace)
+            absolute = workspace["remoteRoot"]
+        else:
+            _, absolute = self.file_path(ident, path)
+        return dict(workspaceId=ident, **self._list_files(workspace["bindingId"], workspace["remoteRoot"], path, absolute, offset))
+
+    def _list_files(self, binding_id, root, path, absolute, offset):
+        require(type(offset) is int and 0 <= offset <= 100000, "invalid_offset")
+        # Names and stat metadata only; never follow directory-entry symlinks.
+        script = """import json,os,stat,sys
+p=sys.argv[1]; offset=int(sys.argv[2]); items=[]
+with os.scandir(p) as entries:
+ for e in entries:
+  if len(items)>=100000: raise RuntimeError('directory_limit')
+  s=e.stat(follow_symlinks=False)
+  kind='symlink' if stat.S_ISLNK(s.st_mode) else 'directory' if stat.S_ISDIR(s.st_mode) else 'file' if stat.S_ISREG(s.st_mode) else 'other'
+  items.append(dict(name=e.name,kind=kind,bytes=s.st_size,modifiedAt=s.st_mtime))
+items.sort(key=lambda e:(e['kind']!='directory',e['name']))
+print(json.dumps(dict(entries=items[offset:offset+100],nextOffset=offset+100 if offset+100<len(items) else None)))
+"""
+        result = self.g.execute(dict(target={"bindingId": binding_id}, argv=["python3", "-c", script, absolute, str(offset)]))
+        require(result["outcome"] == "SUCCEEDED" and not result["result"]["truncated"], "workspace_listing_failed", 502)
+        try:
+            value = json.loads(result["result"]["stdout"])
+        except ValueError:
+            raise GatewayError("workspace_listing_failed", 502) from None
+        require(isinstance(value, dict) and isinstance(value.get("entries"), list), "workspace_listing_failed", 502)
+        return dict(bindingId=binding_id, root=root, path=path, **value)

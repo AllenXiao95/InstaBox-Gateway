@@ -20,3 +20,11 @@ main:focus{outline:none}#output-matches:empty{display:none}.nav-icon{height:22px
 .feedback.info:not(:empty){background:var(--surface-muted);color:var(--text);border-color:var(--border)}#task-summary{margin-bottom:16px}#task-detail details{margin:16px 0}#task-detail summary{cursor:pointer;min-height:44px;padding:10px 0}
 
 #task-summary{overflow-wrap:anywhere;min-width:0}#task-detail,#task-detail details{min-width:0;max-width:100%}
+
+/* File lists share the console's spacing and native focus treatment. */
+.resource-row{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1rem 0;border-bottom:1px solid var(--border,#d6d8d5);min-width:0}
+.resource-row>div:first-child{min-width:0;flex:1}.resource-row strong,.resource-row p{overflow-wrap:anywhere}.resource-row p{margin:.3rem 0 0}.resource-row .inline-actions{flex-shrink:0;flex-wrap:wrap}
+.button-link{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:.55rem .9rem;border:1px solid currentColor;border-radius:8px;text-decoration:none;font-weight:600;font-size:.875rem;white-space:nowrap}
+.button-link[hidden]{display:none}#files-list{margin-top:1rem}#files-path{overflow-wrap:anywhere}
+@media(max-width:640px){.resource-row{align-items:flex-start;flex-direction:column}.resource-row .inline-actions{width:100%}.resource-row .inline-actions>*{flex:1}}
+#files-location{overflow-wrap:anywhere;white-space:normal}
