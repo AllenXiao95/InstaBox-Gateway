@@ -56,6 +56,8 @@ class Gateway:
         self.tasks = Tasks(self)
         from .drive import Drive
         self.drive = Drive(self)
+        from .files import Files
+        self.files = Files(self)
 
     def accounts(self):
         return [{k: v for k, v in a.items() if k != "encryptedKey"}
@@ -452,10 +454,12 @@ class Gateway:
             self._finish(row, exc.outcome, bytesTransferred=body.transferred, error=exc.code)
             raise
 
-    @contextmanager
     def download(self, target, path):
+        return self._download(target, self.file_path(path))
+
+    @contextmanager
+    def _download(self, target, path):
         """Open a bounded-memory download; the HTTP writer accounts for delivered bytes."""
-        path = self.file_path(path)
         ctx, mid = self._running(target)
         row = self._accept(ctx, mid, "download")
         row["bytesTransferred"] = 0

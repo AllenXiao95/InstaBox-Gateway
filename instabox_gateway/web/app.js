@@ -17,6 +17,15 @@ const state = {
 };
 const controllers = new Set();
 const errors = {
+  local_directory_unavailable: translate("本机目录不可用，请检查路径和系统权限。"),
+  local_directory_required: translate("本机目录不可用，请检查路径和系统权限。"),
+  local_file_exists: translate("本机已有同名文件，请选择其他目录；原文件未改动。"),
+  download_in_progress: translate("该目录已有同名下载进行中。"),
+  file_path_denied: translate("文件路径不在当前接口允许的目录内，或为不可访问的符号链接。"),
+  incomplete_download: translate("下载响应不完整，未生成目标文件。"),
+  local_write_failed: translate("本地文件写入失败，请检查磁盘空间和目录权限。"),
+  insufficient_local_space: translate("本地剩余空间不足，下载未完成。"),
+  download_interrupted: translate("下载被中断，请核对传输记录后重新下载。"),
   authentication_required: translate("无法进入管理控制台，请确认使用本地管理 Token。"),
   network_error: translate("无法连接本地 API，请检查本地服务和端口；请求结果可能未知。"),
   invalid_response: translate("本地 API 响应无法识别；请保留原目标，核对请求记录。"),

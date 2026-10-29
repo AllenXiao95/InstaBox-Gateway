@@ -36,6 +36,7 @@ class Server(ThreadingHTTPServer):
         try:
             super().serve_forever(poll_interval)
         finally:
+            self.gateway.files.close()
             self.gateway.drive.close()
             self.gateway.tasks.close()
 
@@ -201,6 +202,24 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         g = self.server.gateway
+        if path == "/api/admin/files/local" and method == "GET":
+            fields(q, ("path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.files.local(q.get("path"), int(q.get("offset", "0"))))
+        if path == "/api/admin/files/remote" and method == "GET":
+            fields(q, ("bindingId", "path", "offset"))
+            require(q.get("offset", "0").isdecimal())
+            return self._send(200, g.files.remote(q.get("bindingId"), q.get("path", "."), int(q.get("offset", "0"))))
+        if path == "/api/admin/files/downloads":
+            if method == "GET":
+                fields(q, ())
+                return self._send(200, {"downloads": [g.files.public(row) for row in g.files.downloads()]})
+            if method == "POST":
+                return self._send(202, g.files.start(self._body(), self.headers.get("Idempotency-Key")))
+        match = re.fullmatch(r"/api/admin/files/downloads/(d_[a-z0-9]+)/cancel", path)
+        if match and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.files.cancel(match[1]))
         if path == "/api/admin/drive" and method == "GET":
             return self._send(200, g.drive.status())
         if path == "/api/admin/drive/config" and method == "PUT":
