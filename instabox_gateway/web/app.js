@@ -1,7 +1,7 @@
 "use strict";
 const {t: translate, join, text: setText} = window.I18n;
 
-// Credentials, bindings, drafts and output live only in this page's memory.
+// Bindings, drafts and synchronous output live in page memory; auth uses an HttpOnly session.
 const $ = (id) => document.getElementById(id);
 const el = (tag, text, className) => {
   const n = document.createElement(tag);
@@ -10,7 +10,7 @@ const el = (tag, text, className) => {
   return n;
 };
 const state = {
-  token: "", epoch: 0, accounts: [], inventory: [], requests: [], protections: [],
+  token: "", csrf: "", epoch: 0, accounts: [], inventory: [], requests: [], protections: [],
   settings: null, settingsDirty: false, offline: false, target: null, resume: null,
   executing: false, selecting: false, output: null, channel: "stdout", detail: null,
   sort: "name", direction: 1, refreshing: false, settingsSaving: false
@@ -77,7 +77,7 @@ async function api(path, method = "GET", body, headers = {}) {
   try {
     let response;
     try {
-      response = await fetch(path, {method, headers: {Authorization: "Bearer " + state.token, ...(body === undefined ? {} : {"Content-Type": "application/json"}), ...headers}, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", credentials: "omit", signal: controller.signal});
+      response = await fetch(path, {method, headers: {...(state.token === "session" ? {"X-Gateway-CSRF":state.csrf} : {Authorization: "Bearer " + state.token}), ...(body === undefined ? {} : {"Content-Type": "application/json"}), ...headers}, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", credentials: "same-origin", signal: controller.signal});
     } catch (_) {
       if (epoch !== state.epoch) throw new ApiError("stale_session");
       connection(false); throw new ApiError("network_error", "UNKNOWN");
@@ -489,7 +489,8 @@ $("settings-form").addEventListener("submit",event=>{
 
 // Session teardown invalidates in-flight completions before clearing the UI.
 function logout(){
-  state.epoch++;state.token="";inventoryRead++;controllers.forEach(c=>c.abort());controllers.clear();
+  state.epoch++;state.token="";state.csrf="";inventoryRead++;controllers.forEach(c=>c.abort());controllers.clear();
+  window.dispatchEvent(new Event("igw:logout"));
   Object.assign(state,{accounts:[],inventory:[],requests:[],protections:[],settings:null,settingsDirty:false,settingsSaving:false,target:null,resume:null,output:null,detail:null,executing:false,selecting:false,refreshing:false,offline:false,channel:"stdout"});
   for(const d of document.querySelectorAll("dialog")){if(d.open)d.close();setDialogBusy(d,false);}
   // Old async handlers deliberately skip updates after an epoch change. Reset
@@ -505,21 +506,25 @@ function logout(){
   setText($("output"),translate("尚无输出"));setText($("result-badge"),translate("尚未执行"));$("result-badge").className="badge";setText($("output-matches"),"");$("resume-panel").hidden=true;$("copy-output").disabled=true;
   $("workspace").hidden=true;$("login").hidden=false;updateExecute();closeNav();$("login-token").focus();
 }
+async function enterConsole(csrf) {
+  state.epoch++; state.csrf=csrf; state.token="session";
+  const data=await api("/api/admin/accounts");state.accounts=data.accounts;
+  $("login").hidden=true;$("workspace").hidden=false;$("local-address").textContent=location.host;
+  setText($("client-help"),"igw-client login\nigw-client machines\nigw-client --account ACCOUNT_ID --machine MACHINE_ID select\nigw-client --binding BINDING_ID exec -- printf hello");
+  route();renderTarget();window.dispatchEvent(new Event("igw:login"));await refresh();
+}
 $("login-form").addEventListener("submit",async event=>{
-  event.preventDefault();const f=event.target;if(f.querySelector("button").disabled)return;
-  state.epoch++;state.token=f.elements.token.value;f.elements.token.value="";
-  const epoch=state.epoch;feedback("login-error","");
+  event.preventDefault();const f=event.target;
+  const token=f.elements.token.value;f.elements.token.value="";
   await busy(f.querySelector("button"),async()=>{
-    try{
-      const data=await api("/api/admin/accounts");state.accounts=data.accounts;$("login").hidden=true;$("workspace").hidden=false;
-      $("local-address").textContent=location.host;
-      setText($("client-help"),join("IGW_URL=",location.origin,"\n\nigw-client machines\n",translate("igw-client --account <接入ID> --machine <机器ID> select\nigw-client --binding <绑定ID> exec -- printf hello\n\n运行 igw token execution 获取执行凭据。\n客户端通过 IGW_TOKEN 或隐藏输入读取凭据。")));
-      route();renderTarget();await refresh();
-    }catch(error){if(epoch===state.epoch){state.token="";throw error;}}
+    const response=await fetch("/api/auth/login",{method:"POST",credentials:"same-origin",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:"{}"});
+    if(!response.ok)throw new ApiError("authentication_required");
+    await enterConsole((await response.json()).csrf);
   },"login-error");
 });
+async function signout(){await api("/api/auth/logout","POST",{});logout();}
 $("logout").addEventListener("click",()=>{
-  if(state.executing)confirmAction(translate("退出并清除本地页面"),[translate("当前命令可能继续在远端运行。退出不代表取消或终止；本次输出将无法从历史恢复。")],logout,translate("清除页面并退出"));else logout();
+  if(state.executing)confirmAction(translate("退出并清除本地页面"),[translate("当前命令可能继续在远端运行。退出不代表取消或终止；本次输出将无法从历史恢复。")],signout,translate("清除页面并退出"));else busy($("logout"),signout);
 });
 $("nav-toggle").addEventListener("click",()=>{
   const open=!$("sidebar").classList.contains("open");$("sidebar").classList.toggle("open",open);$("nav-toggle").setAttribute("aria-expanded",String(open));$("main").inert=open;if(open)$("nav-close").focus();
@@ -551,3 +556,13 @@ window.addEventListener("igw:languagechange", () => {
   if (state.output) renderResult();
   else if (!state.executing) renderOutput();
 });
+
+(async()=>{
+  const ticket=location.hash.startsWith("#login=") ? location.hash.slice(7) : null;
+  if(ticket)history.replaceState(null,"",location.pathname+"#instances");
+  try{
+    const response=await fetch(ticket ? "/api/auth/login" : "/api/auth/session",ticket ? {method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticket})} : {credentials:"same-origin"});
+    if(response.ok)await enterConsole((await response.json()).csrf);
+    else if(ticket)feedback("login-error",translate("登录链接已失效，请重新运行 igw open。"));
+  }catch(_){feedback("login-error",translate("无法连接本地 API，请检查本地服务和端口；请求结果可能未知。"));}
+})();

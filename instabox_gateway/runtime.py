@@ -16,6 +16,7 @@ from .errors import GatewayError
 from .gateway import Gateway
 from .http import Server
 from .upstream import Upstream
+from .auth import private_json
 
 
 class ProcessLock:
@@ -81,6 +82,7 @@ def run_server(store, port, *, worker=False):
         server = Server(("127.0.0.1", port), Gateway(store, Upstream()))
         record = {"instanceId": server.instance_id, "pid": os.getpid(), "port": port}
         _write_instance(store.directory, record)
+        private_json(store.directory / "local-access.json", {**record, "secret": server.auth.bootstrap})
         if threading.current_thread() is threading.main_thread():
             old_term = signal.signal(signal.SIGTERM, lambda *_: threading.Thread(
                 target=server.shutdown, daemon=True).start())
@@ -101,6 +103,7 @@ def run_server(store, port, *, worker=False):
             try:
                 if read_instance(store.directory) == record:
                     instance_path(store.directory).unlink()
+                    (store.directory / "local-access.json").unlink(missing_ok=True)
             except (OSError, GatewayError):
                 pass
         if lock:

@@ -2,6 +2,15 @@
 // Chinese source messages are stable gettext-style message IDs.
 (() => {
 const english = {
+  "刷新": "Refresh",
+  "请选择": "Select an option",
+  "与已解锁服务配对一次，后续无需反复输入 Token。客户端无需上游 API Key，也不能修改账号或保护清单。": "Pair once with the unlocked service instead of repeatedly entering a token. Clients need no upstream API keys and cannot change accounts or protections.",
+  "失败": "Failed",
+  "可达": "Available",
+  "登录链接已失效，请重新运行 igw open。": "This login link expired. Run igw open again.",
+  "登录会话刷新后保留，退出或服务重启后失效。": "Your session survives refresh. Sign-out or a service restart ends it.",
+  "兼容手工登录；推荐运行 igw open 直接打开已登录控制台。此处不输入 InstaBox API Key。": "Manual token login remains available. Run igw open to open a signed-in console. Do not enter an InstaBox API key here.",
+
   "运行命令": "Run",
   " · 优先级 ": " · Priority ",
   " 保留上次数据，仅供查看。": " Previous data is retained for reference only.",

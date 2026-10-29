@@ -10,14 +10,22 @@ import urllib.parse
 import urllib.request
 
 
+from .auth import local_request, private_json, read_private
+from .errors import GatewayError
+
+
 def main(argv=None):
+    from .cli import default_directory
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=os.environ.get("IGW_URL", "http://127.0.0.1:18761"))
+    parser.add_argument("--data-dir", type=Path, default=default_directory())
+    parser.add_argument("--url", default=os.environ.get("IGW_URL"))
     parser.add_argument("--account")
     parser.add_argument("--machine")
     parser.add_argument("--binding")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("machines")
+    sub.add_parser("login", help="Pair once with the running, unlocked local service")
+    sub.add_parser("logout", help="Remove this CLI's saved execution credential")
     select = sub.add_parser("select")
     select.add_argument("--allow-wake", action="store_true")
     execute = sub.add_parser("exec")
@@ -34,6 +42,26 @@ def main(argv=None):
     operation = sub.add_parser("operation")
     operation.add_argument("id")
     args = parser.parse_args(argv)
+    args.data_dir = args.data_dir.expanduser().resolve()
+    profile_path = args.data_dir / "client.json"
+    try:
+        profile = read_private(profile_path) if profile_path.exists() else {}
+        args.url = args.url or profile.get("url", "http://127.0.0.1:18761")
+        if args.action == "login":
+            record, reply = local_request(args.data_dir, "pair")
+            expected_url = f"http://127.0.0.1:{record['port']}"
+            if args.url.rstrip("/") not in (expected_url, expected_url.replace("127.0.0.1", "localhost")):
+                parser.error("Gateway URL does not match this running local service")
+            private_json(profile_path, {"url": args.url.rstrip("/"), "token": reply["token"]})
+            print("Paired with the local Gateway. Execution access only; no upstream keys saved.")
+            return 0
+        if args.action == "logout":
+            profile_path.unlink(missing_ok=True)
+            print("Local CLI credential removed. Shared execution token was not revoked.")
+            return 0
+    except (OSError, ValueError, GatewayError) as exc:
+        print(getattr(exc, "code", "local_pairing_failed") + "; start/unlock Gateway and check the data directory", file=sys.stderr)
+        return 1
     try:
         url = urllib.parse.urlsplit(args.url)
         if url.port is not None and not 1 <= url.port <= 65535:
@@ -46,7 +74,8 @@ def main(argv=None):
         parser.error("Use either binding or account + machine")
     if args.action in ("exec", "upload", "download", "resume") and not (args.binding or args.account and args.machine):
         parser.error("An explicit account + machine or binding is required")
-    token = os.environ.get("IGW_TOKEN") or getpass.getpass("Gateway execution token: ")
+    paired_token = profile.get("token") if profile.get("url") == args.url.rstrip("/") else None
+    token = os.environ.get("IGW_TOKEN") or paired_token or getpass.getpass("Gateway execution token: ")
     target = {"bindingId": args.binding} if args.binding else {"accountId": args.account, "machineId": args.machine}
     body, method, path = None, "GET", "/api/v1/machines"
     headers = {"Authorization": "Bearer " + token}

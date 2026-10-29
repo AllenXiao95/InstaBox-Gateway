@@ -4,6 +4,8 @@ import os
 import re
 import secrets
 import threading
+import time
+from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from urllib.parse import parse_qs, urlsplit
@@ -11,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from .errors import GatewayError
 from .gateway import fields, require
 from .upstream import MAX_FILE
+from .auth import BrowserAuth
 
 
 class Server(ThreadingHTTPServer):
@@ -24,6 +27,7 @@ class Server(ThreadingHTTPServer):
         require(address[0] == "127.0.0.1", "loopback_required")
         self.gateway = gateway
         self.instance_id = secrets.token_hex(16)
+        self.auth = BrowserAuth()
         super().__init__(address, Handler)
 
     def handle_error(self, request, client_address):
@@ -41,17 +45,22 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, status, data, content_type="application/json", request_id=None):
         if not isinstance(data, bytes):
             data = json.dumps(data, ensure_ascii=True).encode()
+        self._headers(status, len(data), content_type, request_id)
+        self.wfile.write(data)
+
+    def _headers(self, status, length, content_type, request_id=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         if request_id:
             self.send_header("X-Gateway-Request-Id", request_id)
+        if getattr(self, "_cookie", None):
+            self.send_header("Set-Cookie", self._cookie)
         self.end_headers()
-        self.wfile.write(data)
 
     def _body(self, binary=False):
         require(not self.headers.get("Transfer-Encoding"), "transfer_encoding_unsupported")
@@ -75,6 +84,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth(self, admin=False):
         authorization = self.headers.get("Authorization", "")
+        if not authorization:
+            _, session = self._session()
+            require(session is not None, "authentication_required", 401)
+            if self.command not in ("GET", "HEAD"):
+                require(self.headers.get("Origin") in self._origins
+                        and hmac.compare_digest(self.headers.get("X-Gateway-CSRF", "").encode(), session["csrf"].encode()), "csrf_required", 403)
+            return
         require(authorization.startswith("Bearer "), "authentication_required", 401)
         token = authorization[7:]
         require(len(token) <= 256 and token.isascii(), "authentication_required", 401)
@@ -82,10 +98,24 @@ class Handler(BaseHTTPRequestHandler):
         roles = ("admin",) if admin else ("admin", "execution")
         require(any(hmac.compare_digest(token, store.token(role)) for role in roles), "authentication_required", 401)
 
+    def _session(self):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return None, None
+        ident = cookie["igw_session"].value if "igw_session" in cookie else ""
+        session = self.server.auth.sessions.get(ident)
+        if session and session["expires"] <= time.monotonic():
+            self.server.auth.sessions.pop(ident, None)
+            session = None
+        return ident, session
+
     def _dispatch(self):
         self.connection.settimeout(15)
         port = self.server.server_address[1]
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        self._origins = {"http://" + h for h in hosts}
         require(self.headers.get("Host") in hosts, "host_denied", 403)
         origin = self.headers.get("Origin")
         require(origin is None or origin in {"http://" + h for h in hosts}, "origin_denied", 403)
@@ -107,6 +137,40 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path in static:
             name, mime = static[path]
             return self._send(200, files("instabox_gateway").joinpath("web", name).read_bytes(), mime)
+        auth = self.server.auth
+        if path in ("/api/auth/ticket", "/api/auth/pair", "/api/auth/status", "/api/auth/stop") and method == "POST":
+            require(hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Local " + auth.bootstrap).encode()), "authentication_required", 401)
+            fields(self._body(), ())
+            value = {"instanceId": self.server.instance_id}
+            if path.endswith(("status", "stop")):
+                self._send(200, {**value, "pid": os.getpid(), "port": port})
+                if path.endswith("stop"):
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            value.update({"ticket": auth.ticket()} if path.endswith("ticket") else {"token": self.server.gateway.store.token("execution")})
+            return self._send(200, value)
+        if path == "/api/auth/login" and method == "POST":
+            require(origin in self._origins, "origin_denied", 403)
+            body = self._body()
+            fields(body, ("ticket",))
+            if "ticket" in body:
+                require(isinstance(body["ticket"], str) and len(body["ticket"]) < 256)
+                ident, csrf = auth.session(body["ticket"])
+            else:
+                self._auth(admin=True)
+                ident, csrf = auth.session()
+            self._cookie = "igw_session=" + ident + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800"
+            return self._send(200, {"csrf": csrf})
+        if path == "/api/auth/session" and method == "GET":
+            _, session = self._session()
+            require(session is not None, "authentication_required", 401)
+            return self._send(200, {"csrf": session["csrf"]})
+        if path == "/api/auth/logout" and method == "POST":
+            self._auth(admin=True)
+            ident, _ = self._session()
+            auth.sessions.pop(ident, None)
+            self._cookie = "igw_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+            return self._send(200, {"loggedOut": True})
         self._auth(admin=path.startswith("/api/admin/"))
         if path == "/api/admin/service" and method == "GET":
             return self._send(200, {"instanceId": self.server.instance_id,
