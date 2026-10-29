@@ -100,8 +100,8 @@ function closeNav(focus = false) {
 }
 function route(focus = true) {
   if (!state.token) return;
-  const page = ["instances", "accounts", "execution", "tasks", "files", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "instances";
-  for (const name of ["instances", "accounts", "execution", "tasks", "files", "settings"]) $("page-" + name).hidden = name !== page;
+  const page = ["instances", "accounts", "execution", "tasks", "files", "drive", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "instances";
+  for (const name of ["instances", "accounts", "execution", "tasks", "files", "drive", "settings"]) $("page-" + name).hidden = name !== page;
   document.querySelectorAll("[data-page]").forEach(n => { if (n.dataset.page === page) n.setAttribute("aria-current", "page"); else n.removeAttribute("aria-current"); });
   closeNav();
   if (focus) $("main").focus({preventScroll: true});

@@ -32,9 +32,11 @@ class Server(ThreadingHTTPServer):
 
     def serve_forever(self, poll_interval=0.5):
         self.gateway.tasks.start_monitor()
+        self.gateway.drive.start_monitor()
         try:
             super().serve_forever(poll_interval)
         finally:
+            self.gateway.drive.close()
             self.gateway.tasks.close()
 
     def handle_error(self, request, client_address):
@@ -146,6 +148,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/i18n.js": ("i18n.js", "text/javascript; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/tasks.js": ("tasks.js", "text/javascript; charset=utf-8"),
+                  "/drive.js": ("drive.js", "text/javascript; charset=utf-8"),
                   "/files.js": ("files.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8")}
         if method == "GET" and path in static:
@@ -198,6 +201,77 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         g = self.server.gateway
+        if path == "/api/admin/drive" and method == "GET":
+            return self._send(200, g.drive.status())
+        if path == "/api/admin/drive/config" and method == "PUT":
+            return self._send(200, g.drive.configure(self._body()))
+        if path == "/api/admin/drive/connect" and method == "POST":
+            return self._send(200, g.drive.connect(self._body()))
+        if path == "/api/admin/drive/disconnect" and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.drive.disconnect())
+        if path == "/api/admin/drive/files" and method == "GET":
+            fields(q, ("parentId", "pageToken", "shared"))
+            return self._send(200, g.drive.files(q.get("parentId", "root"), q.get("pageToken"), q.get("shared") == "true"))
+        if path == "/api/admin/drive/selections" and method == "POST":
+            return self._send(201, g.drive.select(self._body()))
+        match = re.fullmatch(r"/api/admin/drive/selections/(gs_[a-z0-9]+)", path)
+        if match and method == "DELETE":
+            g.store.delete("drive_selection", match[1])
+            return self._send(200, {"removed": True})
+        if path == "/api/v1/drive/selections" and method == "GET":
+            return self._send(200, {"selections": g.drive.selections()})
+        match = re.fullmatch(r"/api/v1/drive/selections/(gs_[a-z0-9]+)/(files|content|upload)", path)
+        if match:
+            ident, action = match.groups()
+            if action == "files" and method == "GET":
+                fields(q, ("parentId", "pageToken"))
+                selection = g.drive.selection(ident)
+                parent = q.get("parentId", selection["fileId"])
+                metadata = g.drive.selected_file(selection, parent)
+                require(metadata["mimeType"] == "application/vnd.google-apps.folder", "drive_not_a_folder")
+                return self._send(200, g.drive.files(parent, q.get("pageToken"), connection_id=selection["connectionId"]))
+            if action == "content" and method == "GET":
+                fields(q, ("fileId", "download", "preview"))
+                preview = q.get("preview") == "1"
+                with g.drive.content(ident, q.get("fileId"), partial=preview) as (metadata, reader):
+                    if preview:
+                        require(metadata["mimeType"].startswith("text/") or metadata["mimeType"] == "application/json", "drive_preview_unsupported", 415)
+                        data = bytearray()
+                        while len(data) <= 262144:
+                            chunk = reader.read(min(65536, 262145 - len(data)))
+                            if not chunk:
+                                break
+                            data.extend(chunk)
+                        result = dict(text=bytes(data[:262144]).decode("utf-8", "replace"), truncated=len(data) > 262144)
+                    else:
+                        self._attachment = metadata["name"]
+                        self.connection.settimeout(60)
+                        self._headers(200, metadata["bytes"], "application/octet-stream")
+                        while True:
+                            chunk = reader.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                if preview:
+                    return self._send(200, result)
+                return
+            if action == "upload" and method == "POST":
+                fields(q, ("name",))
+                return self._send(200, g.drive.upload(ident, q.get("name"), self._body(binary=True), self.headers.get("Idempotency-Key")))
+        if path == "/api/v1/drive/imports":
+            if method == "GET":
+                return self._send(200, {"imports": g.store.rows("drive_import"), "uploads": [g.drive.public_upload(u) for u in g.store.rows("drive_upload")]})
+            if method == "POST":
+                return self._send(202, g.drive.submit(self._body(), self.headers.get("Idempotency-Key")))
+        match = re.fullmatch(r"/api/v1/drive/uploads/(du_[a-z0-9]+)/verify", path)
+        if match and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.drive.verify_upload(match[1]))
+        match = re.fullmatch(r"/api/v1/drive/imports/(t_[a-z0-9]+)/(cancel|resume)", path)
+        if match and method == "POST":
+            fields(self._body(), ())
+            return self._send(200, g.drive.control(match[1], match[2]))
         match = re.fullmatch(r"/api/v1/workspaces/(w_[a-z0-9]+)/files", path)
         if match and method == "GET":
             fields(q, ("path", "offset"))

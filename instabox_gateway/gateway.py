@@ -54,6 +54,8 @@ class Gateway:
         from .tasks import Tasks
         self.workspaces = Workspaces(self)
         self.tasks = Tasks(self)
+        from .drive import Drive
+        self.drive = Drive(self)
 
     def accounts(self):
         return [{k: v for k, v in a.items() if k != "encryptedKey"}
