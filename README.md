@@ -144,6 +144,19 @@ renewed. scheduler/exec creates its own short lease, releases it on
 confirmed completion, and marks a timeout or ambiguous failure uncertain
 until expiry or manual release. Do not automatically replay uncertain writes.
 
+CLI equivalents for the common scheduler operations:
+
+~~~sh
+igw-client resources
+igw-client schedule --lease-seconds 900
+igw-client schedule-exec --timeout 30 -- python3 -c 'print(123)'
+igw-client lease-renew l_YOUR_LEASE_ID --lease-seconds 900
+igw-client lease-release l_YOUR_LEASE_ID
+~~~
+
+Add --account ACCOUNT_ID **before** the command to limit the scheduler to
+one account. The scheduled command exits with the remote command's exit code.
+
 **Boundaries:** this is best-effort admission control, not distributed
 machine locking. Direct SSH, raw /api/v1/exec, existing bindings and external
 processes do not honor scheduler leases. A machine can become busy after

@@ -120,6 +120,20 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(result["scheduling"]["leaseReleased"])
         self.assertEqual(self.g.store.get("scheduler_lease", result["scheduling"]["leaseId"])["status"], "uncertain")
 
+    def test_invalid_exec_does_not_claim_lease(self):
+        with self.assertRaises(GatewayError):
+            self.s.execute({"argv": []})
+        self.assertEqual(self.g.store.rows("scheduler_lease"), [])
+
+    def test_probe_rejects_unknown_and_detects_gpu_process(self):
+        self.probe.stop()
+        self.g._call = lambda *args, **kwargs: (200, {"exitCode": 0, "timedOut": False,
+                             "truncated": False, "stdout": '{"cpuPercent":2,"loadPerCpu":0.1,"memoryAvailablePercent":80,"gpuBusy":true}'})
+        self.assertEqual(self.s._probe("a_one", "m_one")["reason"], "gpu_process_active")
+        self.g._call = lambda *args, **kwargs: (200, {"exitCode": 0, "timedOut": False,
+                             "truncated": False, "stdout": 'not json'})
+        self.assertEqual(self.s._probe("a_one", "m_one")["reason"], "probe_unavailable")
+
     def test_failed_inventory_not_scheduled(self):
         self.g.machine_rows[0]["complete"] = False
         self.assertEqual(self.s.allocate({})["lease"]["accountId"], "a_two")

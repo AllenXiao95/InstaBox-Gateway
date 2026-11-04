@@ -42,6 +42,18 @@ def main(argv=None):
     ws.add_argument("--local-root", type=Path, default=Path.cwd())
     select = sub.add_parser("select")
     select.add_argument("--allow-wake", action="store_true")
+    sub.add_parser("resources", help="Probe machine idleness across accounts")
+    schedule = sub.add_parser("schedule", help="Reserve one idle machine across accounts")
+    schedule.add_argument("--lease-seconds", type=int, default=900)
+    scheduled_exec = sub.add_parser("schedule-exec", help="Execute a short command on one idle machine")
+    scheduled_exec.add_argument("--timeout", type=int, default=60)
+    scheduled_exec.add_argument("--cwd")
+    scheduled_exec.add_argument("argv", nargs=argparse.REMAINDER)
+    release_lease = sub.add_parser("lease-release", help="Release an existing scheduler lease")
+    release_lease.add_argument("lease_id")
+    renew_lease = sub.add_parser("lease-renew", help="Extend an existing scheduler lease")
+    renew_lease.add_argument("lease_id")
+    renew_lease.add_argument("--lease-seconds", type=int, default=900)
     execute = sub.add_parser("exec")
     execute.add_argument("--cwd")
     execute.add_argument("--timeout", type=int, default=60)
@@ -117,6 +129,9 @@ def main(argv=None):
         parser.error("Invalid Gateway URL")
     if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or url.username or url.password or url.path not in ("", "/") or url.query or url.fragment:
         parser.error("Gateway URL must be a local loopback HTTP origin")
+    if args.action in ("resources", "schedule", "schedule-exec", "lease-release", "lease-renew"):
+        if args.binding or args.machine or args.workspace:
+            parser.error("Scheduler commands accept --account only, not binding, machine or workspace")
     if args.binding and (args.account or args.machine):
         parser.error("Use either binding or account + machine")
     if args.workspace and (args.binding or args.account or args.machine):
@@ -140,7 +155,29 @@ def main(argv=None):
         except (OSError, ValueError, KeyError, StopIteration):
             print("workspace_not_found_or_unavailable", file=sys.stderr)
             return 1
-    if args.action == "select":
+    if args.action == "resources":
+        path = "/api/v1/scheduler/resources"
+        if args.account:
+            path += "?" + urllib.parse.urlencode({"accountId": args.account})
+    elif args.action == "schedule":
+        path, method = "/api/v1/scheduler/allocate", "POST"
+        body = {"leaseSeconds": args.lease_seconds}
+        if args.account:
+            body["accountIds"] = [args.account]
+    elif args.action == "schedule-exec":
+        path, method = "/api/v1/scheduler/exec", "POST"
+        body = {"argv": args.argv[1:] if args.argv[:1] == ["--"] else args.argv,
+                "timeoutSeconds": args.timeout}
+        if args.account:
+            body["accountIds"] = [args.account]
+        if args.cwd:
+            body["cwd"] = args.cwd
+    elif args.action in ("lease-release", "lease-renew"):
+        path = "/api/v1/scheduler/" + ("release" if args.action == "lease-release" else "renew")
+        method, body = "POST", {"leaseId": args.lease_id}
+        if args.action == "lease-renew":
+            body["leaseSeconds"] = args.lease_seconds
+    elif args.action == "select":
         body = {"allowWake": args.allow_wake}
         if args.binding or args.machine:
             body["target"] = target
@@ -307,7 +344,7 @@ def main(argv=None):
             if args.action == "upload" and (data.transferred != data.length or value.get("size") != data.length or value.get("sha256") != data.sha256.hexdigest()):
                 raise ValueError("upload checksum mismatch")
             print(json.dumps(value, ensure_ascii=True))
-            if args.action in ("exec", "test", "git") and "result" in value:
+            if args.action in ("exec", "test", "git", "schedule-exec") and "result" in value:
                 code = value["result"]["exitCode"]
                 return code if 0 <= code <= 255 else 1
             return 0

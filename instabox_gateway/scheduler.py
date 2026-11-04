@@ -212,6 +212,14 @@ class Scheduler:
         fields(body, ("accountIds", "argv", "cmd", "cwd", "envs", "stdin", "timeoutSeconds"))
         timeout = body.get("timeoutSeconds", 60)
         require(type(timeout) is int and 1 <= timeout <= 120, "invalid_request")
+        require(("argv" in body) != ("cmd" in body), "invalid_request")
+        if "argv" in body:
+            argv = body["argv"]
+            require(isinstance(argv, list) and bool(argv) and all(isinstance(a, str) for a in argv)
+                    and bool(argv[0]) and sum(len(a.encode()) + 1 for a in argv) <= 65536,
+                    "invalid_request")
+        else:
+            text(body["cmd"], 65536)
         chosen = self.allocate({"accountIds": body.get("accountIds"), "leaseSeconds": max(180, timeout + 60)})
         lease_id = chosen["lease"]["id"]
         request = {k: v for k, v in body.items() if k != "accountIds"}
