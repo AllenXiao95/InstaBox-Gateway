@@ -3,6 +3,7 @@ import http.client
 import posixpath
 import re
 import secrets
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -245,6 +246,11 @@ class Gateway:
             require(set(target) == {"bindingId"})
             binding = self.store.get("binding", text(target["bindingId"], 100))
             require(binding is not None, "binding_not_found", 404)
+            if binding.get("reason") == "idle_scheduler":
+                lease = self.store.get("scheduler_lease", binding.get("leaseId"))
+                require(lease is not None and lease["bindingId"] == binding["id"]
+                        and lease["status"] == "active" and lease["expiresAt"] > time.time(),
+                        "scheduler_lease_inactive", 409)
             ctx = self.context(binding["accountId"])
             require(ctx.version == binding["version"], "binding_invalid", 409)
             machine_id = binding["machineId"]

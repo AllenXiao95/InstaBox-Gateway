@@ -161,7 +161,8 @@ one account. The scheduled command exits with the remote command's exit code.
 machine locking. Direct SSH, raw /api/v1/exec, existing bindings and external
 processes do not honor scheduler leases. A machine can become busy after
 probing; the normal execution path still verifies running state. Expired
-leases do not revoke previously issued bindings. No automatic machine wake,
+scheduler-issued leases invalidate their bindings. Existing non-scheduler
+bindings remain unaffected. No automatic machine wake,
 task queue, migration, preemption, file synchronization or cross-machine
 retry is implemented. Use explicit renewal for long-lived bindings; this
 release is for short commands and allocation, not unattended background

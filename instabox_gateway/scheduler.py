@@ -163,7 +163,7 @@ class Scheduler:
                     continue
                 binding_id = "b_" + secrets.token_hex(12)
                 lease_id = "l_" + secrets.token_hex(12)
-                binding = {"id": binding_id, "accountId": ctx.account,
+                binding = {"id": binding_id, "leaseId": lease_id, "accountId": ctx.account,
                            "machineId": item["machineId"], "version": ctx.version,
                            "userId": ctx.user, "orgId": ctx.org,
                            "createdAt": now(), "reason": "idle_scheduler"}
@@ -215,8 +215,10 @@ class Scheduler:
         require(("argv" in body) != ("cmd" in body), "invalid_request")
         if "argv" in body:
             argv = body["argv"]
-            require(isinstance(argv, list) and bool(argv) and all(isinstance(a, str) for a in argv)
-                    and bool(argv[0]) and sum(len(a.encode()) + 1 for a in argv) <= 65536,
+            require(isinstance(argv, list) and 0 < len(argv) <= 4096, "invalid_request")
+            for arg in argv:
+                text(arg, 65536, empty=True)
+            require(bool(argv[0]) and sum(len(a.encode()) + 1 for a in argv) <= 65536,
                     "invalid_request")
         else:
             text(body["cmd"], 65536)

@@ -134,6 +134,21 @@ class SchedulerTests(unittest.TestCase):
                              "truncated": False, "stdout": 'not json'})
         self.assertEqual(self.s._probe("a_one", "m_one")["reason"], "probe_unavailable")
 
+    def test_scheduler_binding_requires_active_lease(self):
+        from instabox_gateway.gateway import Gateway as RealGateway
+        allocated = self.s.allocate({})
+        binding = allocated["binding"]
+        resolver = RealGateway.__new__(RealGateway)
+        resolver.store = self.g.store
+        resolver.lock = self.g.lock
+        resolver.context = self.g.context
+        resolver._current = self.g._current
+        self.assertEqual(resolver._resolve({"bindingId": binding["id"]})[1], binding["machineId"])
+        self.s.release({"leaseId": allocated["lease"]["id"]})
+        with self.assertRaises(GatewayError) as error:
+            resolver._resolve({"bindingId": binding["id"]})
+        self.assertEqual(error.exception.code, "scheduler_lease_inactive")
+
     def test_failed_inventory_not_scheduled(self):
         self.g.machine_rows[0]["complete"] = False
         self.assertEqual(self.s.allocate({})["lease"]["accountId"], "a_two")
