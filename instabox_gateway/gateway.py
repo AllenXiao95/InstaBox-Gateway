@@ -54,6 +54,8 @@ class Gateway:
         from .tasks import Tasks
         self.workspaces = Workspaces(self)
         self.tasks = Tasks(self)
+        from .scheduler import Scheduler
+        self.scheduler = Scheduler(self)
         from .drive import Drive
         self.drive = Drive(self)
         from .files import Files

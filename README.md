@@ -92,6 +92,68 @@ HTTP clients use `Authorization: Bearer <execution-token>`. The main routes are 
 
 `GET /api/v1/file` streams downloads. `GET /api/v1/connection-info` accepts the same binding or explicit account/machine target.
 
+
+## Experimental idle-aware cross-account scheduler
+
+This is an **opt-in** alternative to priority-only binding selection. Existing
+igw-client select, fixed workspaces and background-task APIs are unchanged.
+
+The scheduler probes eligible **running**, unprotected machines in enabled
+accounts (up to eight concurrent probes). Each probe invokes a read-only
+Python command via the InstaBox exec API and samples /proc/stat, /proc/meminfo,
+load per CPU and, when available, NVIDIA compute-process PIDs using nvidia-smi.
+A machine is deemed idle if CPU <= 35%, available memory >= 15%, normalized
+load <= 0.75, and no GPU compute process is detected. A failed or incomplete
+probe is **not** considered idle. This is a best-effort heuristic, not proof
+that external jobs or I/O workloads are absent.
+
+With the local execution token, inspect resources, then execute a short
+command on an idle machine from any account:
+
+~~~sh
+curl -fsS -H "Authorization: Bearer $IGW_TOKEN" \
+  http://127.0.0.1:18761/api/v1/scheduler/resources
+
+curl -fsS -X POST -H "Authorization: Bearer $IGW_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"argv":["python3","-c","print(123)"],"timeoutSeconds":30}' \
+  http://127.0.0.1:18761/api/v1/scheduler/exec
+~~~
+
+The scheduler prefers lower account priority numbers, then the lowest
+probed CPU percentage, then stable account/machine IDs. It excludes active
+Gateway background tasks and nonexpired scheduler leases. Simultaneous
+allocations recheck reservations under a shared local lock.
+
+To allocate a client-managed binding and lease:
+
+~~~sh
+curl -fsS -X POST -H "Authorization: Bearer $IGW_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"leaseSeconds":900}' \
+  http://127.0.0.1:18761/api/v1/scheduler/allocate
+~~~
+
+The response includes binding.id and lease.id. Use the binding with the
+existing exec and file endpoints; release it when finished by POSTing
+{"leaseId":"l_..."} to /api/v1/scheduler/release. Renew before expiry
+by POSTing {"leaseId":"l_...","leaseSeconds":900} to
+/api/v1/scheduler/renew. Set accountIds in the allocation body to restrict
+candidate accounts. Leases persist locally for 30–3600 seconds and can be
+renewed. scheduler/exec creates its own short lease, releases it on
+confirmed completion, and marks a timeout or ambiguous failure uncertain
+until expiry or manual release. Do not automatically replay uncertain writes.
+
+**Boundaries:** this is best-effort admission control, not distributed
+machine locking. Direct SSH, raw /api/v1/exec, existing bindings and external
+processes do not honor scheduler leases. A machine can become busy after
+probing; the normal execution path still verifies running state. Expired
+leases do not revoke previously issued bindings. No automatic machine wake,
+task queue, migration, preemption, file synchronization or cross-machine
+retry is implemented. Use explicit renewal for long-lived bindings; this
+release is for short commands and allocation, not unattended background
+task orchestration. Live multi-account acceptance remains pending.
+
 ## Workspaces and background tasks
 
 Save one workspace after choosing a binding. Replace IDs and paths with your own. Commands below assume your project contains the referenced scripts:

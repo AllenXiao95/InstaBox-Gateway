@@ -361,6 +361,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, g.protect(body.get("machineId"), body.get("protected")))
         if path == "/api/admin/requests" and method == "GET":
             return self._send(200, {"requests": g.requests()})
+        if path == "/api/v1/scheduler/resources" and method == "GET":
+            fields(q, ("accountId",))
+            return self._send(200, g.scheduler.resources([q["accountId"]] if "accountId" in q else None))
+        if path == "/api/v1/scheduler/allocate" and method == "POST":
+            return self._send(201, g.scheduler.allocate(self._body()))
+        if path == "/api/v1/scheduler/renew" and method == "POST":
+            return self._send(200, g.scheduler.renew(self._body()))
+        if path == "/api/v1/scheduler/release" and method == "POST":
+            return self._send(200, g.scheduler.release(self._body()))
+        if path == "/api/v1/scheduler/exec" and method == "POST":
+            return self._send(200, g.scheduler.execute(self._body()))
         if path == "/api/v1/machines" and method == "GET":
             fields(q, ("accountId",))
             return self._send(200, g.inventory(q.get("accountId")))

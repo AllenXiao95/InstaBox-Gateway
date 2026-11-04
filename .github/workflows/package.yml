@@ -18,4 +18,5 @@ jobs:
       - run: python -m pip install .
       - run: igw --help
       - run: igw-client --help
+      - run: python -m unittest discover -s tests -v
       - run: python -m pip wheel . --no-deps --wheel-dir dist
