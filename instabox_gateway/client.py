@@ -354,6 +354,15 @@ def main(argv=None):
             error = json.loads(exc.read(65536)).get("error", {})
             safe = {k: v for k, v in error.items() if k in ("code", "outcome", "requestId")
                     and isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", v)}
+            scheduling = error.get("scheduling")
+            if isinstance(scheduling, dict):
+                lease_id = scheduling.get("leaseId")
+                binding_id = scheduling.get("bindingId")
+                released = scheduling.get("leaseReleased")
+                if (isinstance(lease_id, str) and re.fullmatch(r"l_[A-Za-z0-9_-]{1,96}", lease_id)
+                        and isinstance(binding_id, str) and re.fullmatch(r"b_[A-Za-z0-9_-]{1,96}", binding_id)
+                        and type(released) is bool):
+                    safe["scheduling"] = {"leaseId": lease_id, "bindingId": binding_id, "leaseReleased": released}
             if safe:
                 print(json.dumps(safe), file=sys.stderr)
         except (ValueError, AttributeError):

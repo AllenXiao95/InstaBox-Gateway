@@ -144,6 +144,15 @@ renewed. scheduler/exec creates its own short lease, releases it on
 confirmed completion, and marks a timeout or ambiguous failure uncertain
 until expiry or manual release. Do not automatically replay uncertain writes.
 
+Invalid command parameters are rejected before inventory lookup, probing or
+reservation. If execution fails after allocation and the Gateway can return an
+error response, `error.scheduling` includes `leaseId`, `bindingId` and
+`leaseReleased`, alongside the existing error code, outcome and request ID.
+The CLI prints these fields on stderr so you can use `lease-renew` or
+`lease-release`. Releasing a lease does not terminate the remote command.
+If the client loses the entire response, these fields cannot recover the lease;
+do not automatically retry the command.
+
 CLI equivalents for the common scheduler operations:
 
 ~~~sh

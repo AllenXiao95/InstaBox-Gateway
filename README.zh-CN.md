@@ -90,6 +90,8 @@ HTTP 客户端使用 `Authorization: Bearer <执行凭据>`。主要入口为 `G
 
 `GET /api/v1/file` 采用流式下载；`GET /api/v1/connection-info` 接受相同的绑定或显式账号/机器参数。
 
+可选的空闲调度使用 `igw-client schedule-exec`，详见[调度用法](README.md#experimental-idle-aware-cross-account-scheduler)。无效命令参数会在资源查询、探测和分配前被拒绝。分配后若网关返回错误，`error.scheduling` 及 CLI 标准错误会提供 `leaseId`、`bindingId` 和 `leaseReleased`，可据此调用 `lease-renew` 或 `lease-release`。结果不明的命令不要自动重试；释放租约不代表终止远端命令。如果客户端丢失整个响应，这些字段无法帮助找回租约。
+
 ## 工作区与后台任务
 
 选择绑定后保存工作区，将 ID 和路径替换为实际值。以下执行示例假设项目内已有对应脚本：
