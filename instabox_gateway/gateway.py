@@ -37,6 +37,34 @@ def fields(value, allowed):
     require(isinstance(value, dict) and not (set(value) - set(allowed)))
 
 
+EXEC_FIELDS = ("argv", "cmd", "cwd", "envs", "stdin", "timeoutSeconds")
+
+
+def exec_payload(body):
+    """Validate command fields once, before dispatch or resource allocation."""
+    require(("argv" in body) != ("cmd" in body))
+    if "argv" in body:
+        argv = body["argv"]
+        require(isinstance(argv, list) and 0 < len(argv) <= 4096)
+        for arg in argv:
+            text(arg, 65536, empty=True)
+        require(bool(argv[0]) and sum(len(a.encode()) + 1 for a in argv) <= 65536)
+    else:
+        text(body["cmd"], 65536)
+    if "cwd" in body:
+        text(body["cwd"])
+    if "stdin" in body:
+        text(body["stdin"], 1048576, empty=True)
+    if "envs" in body:
+        require(isinstance(body["envs"], dict) and len(body["envs"]) <= 256)
+        for k, v in body["envs"].items():
+            require(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k))
+            text(v, 65536, empty=True)
+    timeout = body.get("timeoutSeconds", 60)
+    require(type(timeout) is int and 1 <= timeout <= 120)
+    return {**{k: body[k] for k in EXEC_FIELDS if k in body}, "timeoutSeconds": timeout}
+
+
 @dataclass(frozen=True)
 class Context:
     account: str
@@ -366,33 +394,16 @@ class Gateway:
         return ctx, mid
 
     def execute(self, body):
-        fields(body, ("target", "argv", "cmd", "cwd", "envs", "stdin", "timeoutSeconds"))
-        require(("argv" in body) != ("cmd" in body))
-        if "argv" in body:
-            argv = body["argv"]
-            require(isinstance(argv, list) and 0 < len(argv) <= 4096)
-            for arg in argv:
-                text(arg, 65536, empty=True)
-            require(bool(argv[0]) and sum(len(a.encode()) + 1 for a in argv) <= 65536)
-        else:
-            text(body["cmd"], 65536)
-        if "cwd" in body:
-            text(body["cwd"])
-        if "stdin" in body:
-            text(body["stdin"], 1048576, empty=True)
-        if "envs" in body:
-            require(isinstance(body["envs"], dict) and len(body["envs"]) <= 256)
-            for k, v in body["envs"].items():
-                require(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k))
-                text(v, 65536, empty=True)
-        timeout = body.get("timeoutSeconds", 60)
-        require(type(timeout) is int and 1 <= timeout <= 120)
-        payload = {k: v for k, v in body.items() if k != "target"}
-        payload["timeoutSeconds"] = timeout
-        ctx, mid = self._running(body.get("target"))
+        fields(body, ("target", *EXEC_FIELDS))
+        return self._execute(body.get("target"), exec_payload(body))
+
+    def _execute(self, target, payload):
+        """Dispatch validated command data, retaining live target/state checks."""
+        ctx, mid = self._running(target)
         row = self._accept(ctx, mid, "exec")
         try:
-            _, result = self._call(ctx, "POST", "/v1/machines/" + mid + "/exec", body=payload, timeout=timeout + 15)
+            _, result = self._call(ctx, "POST", "/v1/machines/" + mid + "/exec",
+                                   body=payload, timeout=payload["timeoutSeconds"] + 15)
             valid = (type(result.get("exitCode")) is int
                      and all(type(result.get(k)) is bool for k in ("timedOut", "truncated"))
                      and all(isinstance(result.get(k), str) for k in ("stdout", "stderr"))

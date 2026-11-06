@@ -6,10 +6,13 @@ class GatewayError(Exception):
         self.outcome = outcome
         self.upstream_status = upstream_status
         self.request_id = None
+        self.scheduling = None
 
     def public(self):
         result = {"code": self.code, "outcome": self.outcome,
                   "upstreamStatus": self.upstream_status}
         if self.request_id:
             result["requestId"] = self.request_id
+        if self.scheduling is not None:
+            result["scheduling"] = self.scheduling
         return result

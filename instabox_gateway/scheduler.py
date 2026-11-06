@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .errors import GatewayError
-from .gateway import fields, require, text
+from .gateway import EXEC_FIELDS, exec_payload, fields, require, text
 from .store import now
 
 # Executed on the selected machine via InstaBox's existing /exec API.
@@ -209,35 +209,23 @@ class Scheduler:
                 self.g.store.put("scheduler_lease", lease_id, lease)
 
     def execute(self, body):
-        fields(body, ("accountIds", "argv", "cmd", "cwd", "envs", "stdin", "timeoutSeconds"))
-        timeout = body.get("timeoutSeconds", 60)
-        require(type(timeout) is int and 1 <= timeout <= 120, "invalid_request")
-        require(("argv" in body) != ("cmd" in body), "invalid_request")
-        if "argv" in body:
-            argv = body["argv"]
-            require(isinstance(argv, list) and 0 < len(argv) <= 4096, "invalid_request")
-            for arg in argv:
-                text(arg, 65536, empty=True)
-            require(bool(argv[0]) and sum(len(a.encode()) + 1 for a in argv) <= 65536,
-                    "invalid_request")
-        else:
-            text(body["cmd"], 65536)
+        fields(body, ("accountIds", *EXEC_FIELDS))
+        payload = exec_payload(body)
+        timeout = payload["timeoutSeconds"]
         chosen = self.allocate({"accountIds": body.get("accountIds"), "leaseSeconds": max(180, timeout + 60)})
         lease_id = chosen["lease"]["id"]
-        request = {k: v for k, v in body.items() if k != "accountIds"}
-        request["target"] = {"bindingId": chosen["binding"]["id"]}
+        scheduling = {"leaseId": lease_id, "bindingId": chosen["binding"]["id"], "leaseReleased": False}
         try:
-            result = self.g.execute(request)
+            result = self.g._execute({"bindingId": scheduling["bindingId"]}, payload)
             if result["outcome"] in ("SUCCEEDED", "NONZERO") and not result["result"]["timedOut"]:
                 self.release({"leaseId": lease_id})
-                released = True
+                scheduling["leaseReleased"] = True
             else:
                 self._uncertain(lease_id)
-                released = False
-            return {**result, "scheduling": {"leaseId": lease_id,
-                    "bindingId": chosen["binding"]["id"],
-                    "leaseReleased": released}}
-        except Exception:
+            return {**result, "scheduling": scheduling}
+        except Exception as exc:
             # A failed HTTP response cannot prove the remote command never started.
             self._uncertain(lease_id)
-            raise
+            error = exc if isinstance(exc, GatewayError) else GatewayError("internal_error", 500, outcome="UNKNOWN")
+            error.scheduling = scheduling
+            raise error from None
